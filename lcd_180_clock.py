@@ -42,9 +42,9 @@ def get_stats():
         conn = sqlite3.connect(DB_PATH); c = conn.cursor()
         c.execute("""
         SELECT COUNT(*),
-               SUM(CASE WHEN status=1 THEN 1 ELSE 0 END),
-               SUM(CASE WHEN type=1 THEN 1 ELSE 0 END),
-               MAX(timestamp)
+                SUM(CASE WHEN status=1 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN type=1 THEN 1 ELSE 0 END),
+                MAX(timestamp)
         FROM queries
         WHERE timestamp >= strftime('%s','now','start of day');
         """)
