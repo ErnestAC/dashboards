@@ -15,7 +15,7 @@ Run this on any machine: it never touches a screen or a real Pi-hole.
 Sample data (the same every run, apart from the clock):
   - a temporary Pi-hole database with 7 days of queries (~24% blocked,
     quiet nights, busy evenings), 14 clients with hostnames, lifetime counters
-  - hostname "pihole", IP 192.168.1.53, CPU 23%, memory 38%, 52.4 °C,
+  - hostname "pihole", IP 192.168.1.53, CPU 23%, memory 38%, disk 41%, 52.4 °C,
     uptime 12d 7h 43m
 """
 import argparse
@@ -39,7 +39,7 @@ DASH_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PIHOLE_DB = "/etc/pihole/pihole-FTL.db"
 
 HOSTNAME, IP = "pihole", "192.168.1.53"
-CPU, MEM = 23.0, 38.0
+CPU, MEM, DISK = 23.0, 38.0, 41.0
 FAKE_FILES = {
     "/proc/uptime": "1064580.12 4000000.00\n",                 # 12d 7h 43m
     "/sys/class/thermal/thermal_zone0/temp": "52400\n",         # 52.4 °C
@@ -138,6 +138,10 @@ def install_patches(db_path, font_fallback, now):
         percent = MEM
     psutil.cpu_percent = lambda *a, **k: CPU
     psutil.virtual_memory = lambda: _VM()
+
+    class _DU:
+        percent = DISK
+    psutil.disk_usage = lambda *a, **k: _DU()
     socket.gethostname = lambda: HOSTNAME
     time.time = lambda: now.timestamp()
 
