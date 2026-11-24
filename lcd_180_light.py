@@ -90,9 +90,10 @@ def get_stats():
 
         # Last 7 blocked queries
         c.execute("""
-        SELECT DISTINCT domain FROM queries
-        WHERE status=1
-        ORDER BY timestamp DESC
+        SELECT domain FROM queries
+        WHERE status=1 AND timestamp >= strftime('%s','now','-1 day')
+        GROUP BY domain
+        ORDER BY MAX(timestamp) DESC
         LIMIT 7;
         """)
         last_blocked = [row[0] for row in c.fetchall()]
@@ -276,14 +277,44 @@ def draw_screen(stats):
     return img
 
 # --- FB ---
+from PIL import ImageChops
+
+# RGB565 split into its high and low byte, per channel (lookup tables)
+_R_HI = [v & 0xF8 for v in range(256)]
+_G_HI = [v >> 5 for v in range(256)]
+_G_LO = [(v & 0x1C) << 3 for v in range(256)]
+_B_LO = [v >> 3 for v in range(256)]
+FB_REFRESH = 60          # rewrite an unchanged frame at least this often (seconds)
+_last_frame, _last_write = None, 0.0
+
 def write_fb(img):
-    img=img.convert("RGB")
-    with open(FB_DEV,"wb") as f:
-        for y in range(HEIGHT):
-            for x in range(WIDTH):
-                r,g,b=img.getpixel((x,y))
-                rgb565=((r&0xF8)<<8)|((g&0xFC)<<3)|(b>>3)
-                f.write(rgb565.to_bytes(2,"little"))
+    """Send img to the framebuffer as little-endian RGB565 in a single write.
+    Unchanged frames are skipped (but rewritten every FB_REFRESH seconds)."""
+    global _last_frame, _last_write
+    r, g, b = img.convert("RGB").split()
+    hi = ImageChops.add(r.point(_R_HI), g.point(_G_HI))
+    lo = ImageChops.add(g.point(_G_LO), b.point(_B_LO))
+    frame = Image.merge("LA", (lo, hi)).tobytes()
+    if frame == _last_frame and time.time() - _last_write < FB_REFRESH:
+        return
+    with open(FB_DEV, "wb") as f:
+        f.write(frame)
+    _last_frame, _last_write = frame, time.time()
+
+# --- CPU SAVING ---
+# Pi-hole numbers change slowly: query the database at most every STATS_TTL
+# seconds and reuse the result for the frames in between.
+STATS_TTL = 30
+
+def _every(seconds, fn):
+    cache = {"t": 0.0, "v": None}
+    def wrapper(*args):
+        if cache["v"] is None or time.time() - cache["t"] >= seconds:
+            cache["v"], cache["t"] = fn(*args), time.time()
+        return cache["v"]
+    return wrapper
+
+get_stats = _every(STATS_TTL, get_stats)
 
 # --- LOOP ---
 if __name__=="__main__":

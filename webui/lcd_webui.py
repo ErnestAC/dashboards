@@ -5,10 +5,11 @@ usage:
   lcd_webui.py                 run the web server
   lcd_webui.py set-password    set or change the login password
 
-It lists the dashboard scripts, renders previews with real data (in a
-separate low-priority process, one at a time, cached), shows what is on
-the physical screen now, and switches the dashboard by writing the script
-name to $LCD_STATE_DIR/active, which lcd_runner.py picks up.
+It lists the dashboard scripts with their pre-generated example images
+(<script>.png next to each script; nothing is rendered here), shows what is
+on the physical screen now (read back from the framebuffer), and switches
+the dashboard by writing the script name to $LCD_STATE_DIR/active, which
+lcd_runner.py picks up. Only the applied dashboard ever renders, on the device.
 
 Environment:
   LCD_DASH_DIR    folder with the dashboard scripts (default: parent of this file)
@@ -26,9 +27,7 @@ import json
 import os
 import secrets
 import socket
-import subprocess
 import sys
-import tempfile
 import threading
 import time
 from http import cookies
@@ -45,10 +44,7 @@ FB_DEV = os.environ.get("LCD_FB_DEV", "/dev/fb1")
 ACTIVE = os.path.join(STATE_DIR, "active")
 STATUS = os.path.join(STATE_DIR, "status.json")
 PASSWORD_FILE = os.path.join(STATE_DIR, "webui.passwd")
-PREVIEW = os.path.join(HERE, "lcd_preview.py")
 
-PREVIEW_TTL = 30            # seconds a rendered preview is reused
-PREVIEW_TIMEOUT = 30
 SESSION_TTL = 7 * 86400
 COOKIE = "lcd_session"
 PBKDF2_ITERS = 120_000
@@ -152,7 +148,17 @@ def describe(name):
 
 def list_dashboards():
     names = sorted(n for n in os.listdir(DASH_DIR) if valid_name(n))
-    return [{"name": n, "desc": describe(n)} for n in names]
+    out = []
+    for n in names:
+        p = preview_path(n)
+        out.append({"name": n, "desc": describe(n),
+                    "preview": int(os.path.getmtime(p)) if os.path.isfile(p) else None})
+    return out
+
+
+def preview_path(name):
+    """The pre-generated example image that sits next to the script."""
+    return os.path.join(DASH_DIR, name[:-3] + ".png")
 
 
 def read_active():
@@ -179,49 +185,7 @@ def set_active(name):
     os.replace(tmp, ACTIVE)
 
 
-# --------------------------------------------------------------- previews
-_preview_cache = {}         # name -> (rendered_at, mtime, png_bytes)
-_render_lock = threading.Lock()
-
-
-def error_png(message):
-    from PIL import Image, ImageDraw
-    img = Image.new("RGB", (480, 320), (40, 16, 18))
-    d = ImageDraw.Draw(img)
-    d.text((16, 16), "Preview failed", fill=(239, 83, 80))
-    y = 40
-    for line in message.splitlines()[-14:]:
-        d.text((16, y), line[:76], fill=(230, 232, 236)); y += 18
-    buf = io.BytesIO(); img.save(buf, "PNG")
-    return buf.getvalue()
-
-
-def render_preview(name, fresh=False):
-    """PNG bytes for a dashboard rendered with live data. Returns (png, ok)."""
-    path = os.path.join(DASH_DIR, name)
-    mtime = os.path.getmtime(path)
-    hit = _preview_cache.get(name)
-    if not fresh and hit and hit[1] == mtime and time.time() - hit[0] < PREVIEW_TTL:
-        return hit[2], True
-    with _render_lock:                       # one render at a time keeps the Pi responsive
-        hit = _preview_cache.get(name)
-        if not fresh and hit and hit[1] == mtime and time.time() - hit[0] < PREVIEW_TTL:
-            return hit[2], True
-        with tempfile.TemporaryDirectory() as tmp:
-            out = os.path.join(tmp, "p.png")
-            try:
-                r = subprocess.run([sys.executable, PREVIEW, path, out], cwd=DASH_DIR,
-                                   capture_output=True, text=True, timeout=PREVIEW_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                return error_png(f"{name} took longer than {PREVIEW_TIMEOUT}s"), False
-            if r.returncode != 0 or not os.path.exists(out):
-                return error_png((r.stdout + r.stderr).strip() or f"exit code {r.returncode}"), False
-            with open(out, "rb") as f:
-                png = f.read()
-        _preview_cache[name] = (time.time(), mtime, png)
-        return png, True
-
-
+# ------------------------------------------------------------ live screen
 def screen_png():
     """What is on the physical screen now, read back from the framebuffer (RGB565)."""
     from PIL import Image
@@ -268,13 +232,14 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("%s %s\n" % (self.address_string(), fmt % args))
 
     # helpers
-    def send(self, code, body=b"", ctype="text/plain; charset=utf-8", headers=None):
+    def send(self, code, body=b"", ctype="text/plain; charset=utf-8", headers=None,
+             cache="no-store"):
         if isinstance(body, str):
             body = body.encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
         for k, v in {**SECURITY_HEADERS, **(headers or {})}.items():
             self.send_header(k, v)
         self.end_headers()
@@ -298,7 +263,6 @@ class Handler(BaseHTTPRequestHandler):
     # routes
     def do_GET(self):
         url = urlparse(self.path)
-        q = parse_qs(url.query)
         s = self.session()
         if url.path == "/":
             return self.send(200, APP_HTML.replace("__CSRF__", s["csrf"]) if s else LOGIN_HTML,
@@ -314,8 +278,13 @@ class Handler(BaseHTTPRequestHandler):
             name = url.path[len("/preview/"):-len(".png")]
             if not valid_name(name):
                 return self.send(404, "no such dashboard")
-            png, ok = render_preview(name, fresh="fresh" in q)
-            return self.send(200 if ok else 500, png, "image/png")
+            try:
+                with open(preview_path(name), "rb") as f:
+                    png = f.read()
+            except OSError:
+                return self.send(404, "no example image for this dashboard")
+            # static file: let the browser keep it; ?v=<mtime> busts the cache when it changes
+            return self.send(200, png, "image/png", cache="private, max-age=86400")
         if url.path == "/screen.png":
             png = screen_png()
             return self.send(200, png, "image/png") if png else self.send(404, "screen not readable")
@@ -408,8 +377,8 @@ main{max-width:1180px;margin:0 auto;padding:20px}
 display:flex;align-items:center;justify-content:center;border:6px solid #000;box-shadow:0 0 0 1px var(--line)}
 .screen img{width:100%;height:100%;object-fit:contain;image-rendering:pixelated;display:block}
 .screen .note{position:absolute;color:var(--dim);font-size:13px;text-align:center;padding:20px}
-.busy::after{content:"Rendering…";position:absolute;right:8px;bottom:8px;font-size:12px;
-background:rgba(0,0,0,.7);padding:3px 8px;border-radius:6px;color:var(--amber)}
+.pane h2 .sub{text-transform:none;letter-spacing:0;font-weight:400;margin-left:6px}
+.card .thumb{display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:12px}
 .meta{margin:12px 0 2px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
 .meta b{font-size:16px}.meta span{color:var(--dim);font-size:13px}
 .desc{color:var(--dim);font-size:13px;min-height:1.4em;margin:0 0 12px}
@@ -433,13 +402,12 @@ h3{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)
 <main>
 <section class="stage">
  <div class="pane">
-  <h2>Preview</h2>
-  <div class="screen" id="pvwrap"><img id="pv" alt="Preview of the selected dashboard"></div>
+  <h2>Preview <span class="sub">example image, sample data</span></h2>
+  <div class="screen" id="pvwrap"><img id="pv" alt="Example of the selected dashboard"><div class="note" id="pvnote" hidden>No example image for this dashboard yet.</div></div>
   <div class="meta"><b id="pvname">–</b><span id="pvtag"></span></div>
   <p class="desc" id="pvdesc"></p>
   <div class="actions">
    <button class="primary" id="apply" disabled>Apply to screen</button>
-   <button id="refresh">Refresh preview</button>
   </div>
   <div class="msg" id="msg"></div><div id="log"></div>
  </div>
@@ -472,17 +440,20 @@ function setMsg(text, cls, log) {
   if (log && log.length) { const p = document.createElement("pre"); p.textContent = log.join("\\n"); $("log").append(p); }
 }
 
-function showPreview(fresh) {
+function previewUrl(d) {
+  return "/preview/" + encodeURIComponent(d.name) + ".png?v=" + d.preview;
+}
+
+function showPreview() {
   if (!selected) return;
   const d = list.find(x => x.name === selected) || {};
   $("pvname").textContent = selected;
   $("pvtag").textContent = selected === active ? "on screen" : "";
   $("pvdesc").textContent = d.desc || "";
-  $("pvwrap").classList.add("busy");
-  $("pv").src = "/preview/" + encodeURIComponent(selected) + ".png?" + (fresh ? "fresh&" : "") + "t=" + Date.now();
+  $("pv").hidden = !d.preview; $("pvnote").hidden = !!d.preview;
+  if (d.preview) $("pv").src = previewUrl(d);
   updateApply();
 }
-$("pv").onload = $("pv").onerror = () => $("pvwrap").classList.remove("busy");
 
 function updateApply() {
   $("apply").disabled = !selected || !!pending || (selected === active && status.state !== "restarting");
@@ -492,7 +463,7 @@ function select(name) {
   selected = name;
   document.querySelectorAll(".card").forEach(c => c.classList.toggle("sel", c.dataset.name === name));
   setMsg("");
-  showPreview(false);
+  showPreview();
 }
 
 function renderGrid() {
@@ -501,9 +472,12 @@ function renderGrid() {
     const card = document.createElement("button");
     card.className = "card" + (d.name === selected ? " sel" : ""); card.dataset.name = d.name;
     const thumb = document.createElement("div"); thumb.className = "thumb";
-    const img = document.createElement("img"); img.loading = "lazy"; img.alt = d.name;
-    img.src = "/preview/" + encodeURIComponent(d.name) + ".png";
-    thumb.append(img);
+    if (d.preview) {
+      const img = document.createElement("img"); img.loading = "lazy"; img.alt = d.name;
+      img.src = previewUrl(d); thumb.append(img);
+    } else {
+      thumb.textContent = "no example image";
+    }
     const name = document.createElement("div"); name.className = "name";
     const label = document.createElement("span"); label.textContent = d.name.replace(/\\.py$/, "");
     name.append(label);
@@ -564,12 +538,11 @@ $("apply").onclick = async () => {
   pending = {name: selected, at: j.applied_at};
   active = selected; renderGrid(); checkPending(); updateApply();
 };
-$("refresh").onclick = () => showPreview(true);
 $("logout").onclick = async () => { await post("/logout"); location.reload(); };
 
 let liveFailed = false;
 function refreshLive() {
-  if (liveFailed) return;
+  if (liveFailed || document.hidden) return;      // no captures for background tabs
   const img = new Image();
   img.onload = () => { $("live").src = img.src; $("live").hidden = false; $("livenote").hidden = true; };
   img.onerror = () => {
@@ -590,6 +563,7 @@ function refreshLive() {
   refreshLive();
   setInterval(refreshStatus, 2000);
   setInterval(refreshLive, 5000);
+  document.addEventListener("visibilitychange", refreshLive);
 })();
 </script></body></html>"""
 

@@ -12,7 +12,8 @@
 #   - adds a drop-in to the LCD service so it runs webui/lcd_runner.py
 #     (the original unit file is not edited; uninstall.sh removes the drop-in)
 #   - adds and starts lcd-webui.service on the chosen port
-# Pi-hole's files, database, web server and services are only read, never changed.
+# Pi-hole's files, database, web server and services are never changed; the web UI
+# doesn't even read them.
 set -euo pipefail
 
 UNIT="" DEFAULT="" PORT=8911
@@ -33,7 +34,6 @@ DASH_DIR="$(dirname "$WEBUI_DIR")"
 STATE_DIR=/var/lib/lcd-dashboard
 PY=/usr/bin/python3
 WEB_USER=lcdweb
-DB=/etc/pihole/pihole-FTL.db
 
 say()  { printf '\033[1m==> %s\033[0m\n' "$*"; }
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -72,13 +72,10 @@ if [[ ! -s "$STATE_DIR/webui.passwd" ]]; then
   runuser -u "$WEB_USER" -- env LCD_STATE_DIR="$STATE_DIR" "$PY" "$WEBUI_DIR/lcd_webui.py" set-password
 fi
 
-# groups the web UI needs: video for the live screen view, and the
-# database's group if Pi-hole's DB isn't world-readable (read access only)
+# the web UI only needs the video group, to read the screen back for the live
+# view. It never opens Pi-hole's database: previews are the pre-made images.
 GROUPS_NEEDED=""
 getent group video >/dev/null && GROUPS_NEEDED="video"
-if [[ -e "$DB" ]] && ! runuser -u "$WEB_USER" -- test -r "$DB"; then
-  GROUPS_NEEDED="$GROUPS_NEEDED $(stat -c %G "$DB")"
-fi
 
 # ------------------------------------------------------------- services
 say "Pointing $UNIT at the runner (drop-in, original unit untouched)"
@@ -111,8 +108,8 @@ RestartSec=5
 # stay out of Pi-hole's way: low priority, capped resources
 Nice=10
 IOSchedulingClass=idle
-CPUQuota=50%
-MemoryMax=256M
+CPUQuota=20%
+MemoryMax=128M
 
 # sandbox: read-only system, writable state folder only
 NoNewPrivileges=yes
