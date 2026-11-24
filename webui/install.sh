@@ -28,7 +28,7 @@ done
 [[ "$UNIT" == *.service ]] || UNIT="$UNIT.service"
 [[ $EUID -eq 0 ]] || { echo "Run with sudo." >&2; exit 1; }
 
-WEBUI_DIR="$(cd "$(dirname "$0")" && pwd)"
+WEBUI_DIR="$(cd "$(dirname "$0")" && pwd -P)"   # real path, not a symlink
 DASH_DIR="$(dirname "$WEBUI_DIR")"
 STATE_DIR=/var/lib/lcd-dashboard
 PY=/usr/bin/python3
@@ -53,7 +53,9 @@ if ! id "$WEB_USER" >/dev/null 2>&1; then
   useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$WEB_USER"
 fi
 if ! runuser -u "$WEB_USER" -- test -r "$DASH_DIR/$DEFAULT"; then
-  fail "$WEB_USER can't read $DASH_DIR (a private home folder?). Put the dashboards somewhere like /opt/lcd-dashboards and run again."
+  fail "$WEB_USER can't read $DASH_DIR (a private home folder?). Move it and run again from there:
+    sudo mv $DASH_DIR /opt/lcd-dashboards && ln -s /opt/lcd-dashboards $DASH_DIR
+    cd /opt/lcd-dashboards/webui && sudo ./install.sh --unit $UNIT --default $DEFAULT"
 fi
 
 say "Preparing $STATE_DIR"
