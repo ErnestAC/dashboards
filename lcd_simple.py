@@ -5,7 +5,8 @@ from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime
 
 # --- CONFIGURATION ---
-FB_DEV = "/dev/fb1"         # Framebuffer device
+import os
+FB_DEV = os.environ.get("LCD_FB_DEV", "/dev/fb1")         # Framebuffer device
 WIDTH = 480                 # LCD width
 HEIGHT = 320                # LCD height
 DB_PATH = "/etc/pihole/pihole-FTL.db"

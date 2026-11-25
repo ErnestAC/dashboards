@@ -12,6 +12,7 @@ Environment:
   LCD_DASH_DIR   folder with the dashboard scripts (default: parent of this file)
   LCD_STATE_DIR  shared state folder (default: /var/lib/lcd-dashboard)
   LCD_DEFAULT    script to run when nothing has been chosen yet
+  LCD_FB_DEV     screen framebuffer for the scripts (default: auto, the SPI screen)
 """
 import collections
 import json
@@ -26,6 +27,31 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DASH_DIR = os.path.abspath(os.environ.get("LCD_DASH_DIR", os.path.join(HERE, "..")))
 STATE_DIR = os.environ.get("LCD_STATE_DIR", "/var/lib/lcd-dashboard")
 DEFAULT = os.environ.get("LCD_DEFAULT", "lcd_180.py")
+
+
+def find_lcd_fb():
+    """The SPI screen's framebuffer: the one whose driver is fbtft (named fb_<chip>,
+    e.g. fb_ili9486). Without HDMI it is often /dev/fb0, not /dev/fb1."""
+    try:
+        for fb in sorted(os.listdir("/sys/class/graphics")):
+            if fb.startswith("fb") and fb[2:].isdigit():
+                with open(f"/sys/class/graphics/{fb}/name") as f:
+                    if f.read().startswith("fb_"):
+                        return "/dev/" + fb
+    except OSError:
+        pass
+    return "/dev/fb1"
+
+
+# dashboard scripts read LCD_FB_DEV; set it unless the service pinned a device
+if os.environ.get("LCD_FB_DEV", "auto") == "auto":
+    # at boot the screen's driver may load after this service starts: give it a moment
+    for _ in range(30):
+        fb = find_lcd_fb()
+        if os.path.exists(fb):
+            break
+        time.sleep(1)
+    os.environ["LCD_FB_DEV"] = fb
 ACTIVE = os.path.join(STATE_DIR, "active")
 STATUS = os.path.join(STATE_DIR, "status.json")
 

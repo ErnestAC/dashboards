@@ -16,7 +16,7 @@ Environment:
   LCD_STATE_DIR   shared state folder (default: /var/lib/lcd-dashboard)
   LCD_WEBUI_BIND  address to listen on (default: 0.0.0.0)
   LCD_WEBUI_PORT  port (default: 8911)
-  LCD_FB_DEV      framebuffer for the live view (default: /dev/fb1)
+  LCD_FB_DEV      framebuffer for the live view (default: auto, the SPI screen)
 """
 import ast
 import getpass
@@ -39,7 +39,23 @@ DASH_DIR = os.path.abspath(os.environ.get("LCD_DASH_DIR", os.path.join(HERE, "..
 STATE_DIR = os.environ.get("LCD_STATE_DIR", "/var/lib/lcd-dashboard")
 BIND = os.environ.get("LCD_WEBUI_BIND", "0.0.0.0")
 PORT = int(os.environ.get("LCD_WEBUI_PORT", "8911"))
-FB_DEV = os.environ.get("LCD_FB_DEV", "/dev/fb1")
+def find_lcd_fb():
+    """The SPI screen's framebuffer: the one whose driver is fbtft (named fb_<chip>,
+    e.g. fb_ili9486). Without HDMI it is often /dev/fb0, not /dev/fb1."""
+    try:
+        for fb in sorted(os.listdir("/sys/class/graphics")):
+            if fb.startswith("fb") and fb[2:].isdigit():
+                with open(f"/sys/class/graphics/{fb}/name") as f:
+                    if f.read().startswith("fb_"):
+                        return "/dev/" + fb
+    except OSError:
+        pass
+    return "/dev/fb1"
+
+
+FB_DEV = os.environ.get("LCD_FB_DEV", "auto")
+if FB_DEV == "auto":
+    FB_DEV = find_lcd_fb()
 
 ACTIVE = os.path.join(STATE_DIR, "active")
 STATUS = os.path.join(STATE_DIR, "status.json")
@@ -264,8 +280,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urlparse(self.path)
         s = self.session()
-        if url.path == "/favicon.svg":            # public, so the login page has it too
+        if url.path == "/favicon.svg":            # icons are public, so the login page has them too
             return self.send(200, FAVICON_SVG, "image/svg+xml", cache="public, max-age=86400")
+        if url.path in ICON_FILES:
+            try:
+                with open(os.path.join(HERE, url.path[1:]), "rb") as f:
+                    data = f.read()
+            except OSError:
+                return self.send(404, "not found")
+            return self.send(200, data, ICON_FILES[url.path], cache="public, max-age=86400")
         if url.path == "/":
             return self.send(200, APP_HTML.replace("__CSRF__", s["csrf"]) if s else LOGIN_HTML,
                              "text/html; charset=utf-8")
@@ -343,6 +366,9 @@ FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
 <rect x="27" y="48" width="10" height="7" fill="#8a93a3"/>
 <rect x="17" y="54" width="30" height="6" rx="3" fill="#8a93a3"/>
 </svg>"""
+# PNG/ICO renders of the same icon, kept next to this file, for browsers without SVG icons.
+ICON_FILES = {"/favicon.ico": "image/x-icon", "/favicon-32.png": "image/png",
+              "/apple-touch-icon.png": "image/png"}
 
 STYLE = """
 :root{--bg:#0b0d12;--panel:#171b23;--panel2:#1f2430;--line:#2a3040;--fg:#e6e8ec;--dim:#8a93a3;
@@ -359,6 +385,8 @@ button.primary{background:var(--red);color:#fff;font-weight:600}
 LOGIN_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>LCD Dashboards</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <style>""" + STYLE + """
 main{max-width:340px;margin:18vh auto 0;padding:0 16px}
 h1{font-size:20px;margin:0 0 4px}p{color:var(--dim);margin:0 0 20px}
@@ -375,6 +403,8 @@ button{width:100%}.msg{color:var(--red);min-height:1.5em;margin-top:10px}
 APP_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>LCD Dashboards</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <style>""" + STYLE + """
 header{display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid var(--line);
 background:var(--panel);position:sticky;top:0;z-index:2;flex-wrap:wrap}

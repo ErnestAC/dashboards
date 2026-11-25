@@ -5,7 +5,8 @@ from datetime import datetime, timedelta
 from collections import deque
 
 # --- CONFIG ---
-FB_DEV = "/dev/fb1"
+import os
+FB_DEV = os.environ.get("LCD_FB_DEV", "/dev/fb1")
 WIDTH, HEIGHT = 480, 320
 DB_PATH = "/etc/pihole/pihole-FTL.db"
 UPDATE_INTERVAL = 2 

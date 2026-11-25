@@ -2,7 +2,8 @@ import time
 import sqlite3
 from PIL import Image, ImageDraw, ImageFont
 
-FB_DEV = "/dev/fb1"
+import os
+FB_DEV = os.environ.get("LCD_FB_DEV", "/dev/fb1")
 WIDTH = 480
 HEIGHT = 320
 
