@@ -21,7 +21,8 @@ The installer:
 2. copies the project to `/opt/lcd-dashboards`;
 3. looks for the screen. If its driver isn't set up yet, it offers to add it to
    `/boot/firmware/config.txt` (a backup is kept) and tells you to reboot;
-4. starts two services and asks you to choose a password for the web page.
+4. asks you to choose a password for the web page (on later runs it offers to change it)
+   and starts two services.
 
 Then open `http://<your-pi>:8911`, sign in, pick a dashboard and press **Apply**.
 
@@ -79,9 +80,10 @@ Your chosen dashboard, password and saved screens are kept.
 | `--default FILE` | dashboard shown until you pick one (default `lcd_180.py`) |
 | `--no-display` | never touch the boot config |
 | `--unit NAME` | reuse an LCD service you already have instead of adding `lcd-dashboard.service` |
-| `--yes` | don't ask questions |
+| `--reset-password` | choose a new web UI password |
+| `--yes` | don't ask questions (a password is still asked for if none is set) |
 
-Change the web password: `sudo -u lcdweb LCD_STATE_DIR=/var/lib/lcd-dashboard python3 /opt/lcd-dashboards/webui/lcd_webui.py set-password`
+Change the web password: `sudo /opt/lcd-dashboards/install.sh --reset-password` (running the installer again also offers to change it)
 
 Logs: `journalctl -u lcd-dashboard -u lcd-webui -f`
 

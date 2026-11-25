@@ -352,7 +352,9 @@ const GEOM = {x: ["int", 0, -480, 960], y: ["int", 0, -320, 640], w: ["int", 100
 function field(label, input) { return el("div", {class: "row"}, el("label", {textContent: label}), input); }
 function bind(input, w, key, read) {
   input.oninput = () => { w[key] = clampProp(w.type, key, read ? read(input) : input.value); draw(); };
-  input.onchange = () => { w[key] = clampProp(w.type, key, read ? read(input) : input.value); draw(); commit(); renderPanel(); };
+  // only the item list is refreshed here: rebuilding the whole panel would swallow
+  // the click that moved focus to the next field
+  input.onchange = () => { w[key] = clampProp(w.type, key, read ? read(input) : input.value); draw(); commit(); renderLayers(); };
   return input;
 }
 function numberInput(w, key) {
@@ -423,7 +425,7 @@ function renderPanel() {
         const a = t.selectionStart != null ? t.selectionStart : t.value.length;
         const b = t.selectionEnd != null ? t.selectionEnd : a;
         t.value = (t.value.slice(0, a) + tok + t.value.slice(b)).slice(0, 200);
-        w.text = t.value; ins.value = ""; draw(); commit();
+        w.text = t.value; ins.value = ""; draw(); commit(); renderLayers();
       };
       p.append(field("", ins));
       p.append(field("Font", fontInput(w)));
@@ -462,8 +464,14 @@ function renderPanel() {
       el("button", {textContent: "Delete", onclick: removeSel})));
   }
 
-  // layers, topmost first
-  const box = el("div", {class: "layers"}, el("div", {class: "h", textContent: `Items (${layout.widgets.length})`}));
+  p.append(el("div", {id: "layers"}));
+  renderLayers();
+}
+
+function renderLayers() {   // the item list at the bottom of the panel, topmost first
+  const holder = $("layers");
+  if (!holder) return;
+  const box = el("div", {class: "layers", id: "layers"}, el("div", {class: "h", textContent: `Items (${layout.widgets.length})`}));
   const ol = el("ol", {});
   for (let i = layout.widgets.length - 1; i >= 0; i--) {
     const x = layout.widgets[i];
@@ -475,7 +483,7 @@ function renderPanel() {
     ol.append(li);
   }
   if (!layout.widgets.length) ol.append(el("li", {textContent: "Nothing yet"}));
-  box.append(ol); p.append(box);
+  box.append(ol); holder.replaceWith(box);
 }
 
 // -------------------------------------------------------------- keyboard

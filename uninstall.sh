@@ -18,7 +18,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --purge) PURGE=1; shift ;;
     --unit) shift 2 ;;                       # accepted for old instructions; found automatically now
-    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -49,7 +49,7 @@ for f in /etc/systemd/system/*.service.d/10-lcd-runner.conf; do
   RESTORE+=("$unit")
 done
 systemctl daemon-reload
-for unit in "${RESTORE[@]}"; do systemctl restart "$unit" || true; done
+for unit in ${RESTORE[@]+"${RESTORE[@]}"}; do systemctl restart "$unit" || true; done
 
 # the Roboto link install.sh made (only if it is a link, never a real font file)
 ROBOTO=/usr/share/fonts/truetype/roboto/Roboto-Bold.ttf
@@ -58,8 +58,14 @@ ROBOTO=/usr/share/fonts/truetype/roboto/Roboto-Bold.ttf
 if [[ $PURGE -eq 1 ]]; then
   n=$(find /var/lib/lcd-dashboard/screens -name '*.json' 2>/dev/null | wc -l || true)
   [[ $n -gt 0 ]] && say "Deleting $n screen(s) you made in the editor"
-  say "Deleting /opt/lcd-dashboards, /var/lib/lcd-dashboard and the lcd/lcdweb users"
-  [[ -f /opt/lcd-dashboards/webui/lcd_runner.py ]] && rm -rf /opt/lcd-dashboards
+  if [[ -e /opt/lcd-dashboards/.git ]]; then
+    # installed in place from a git clone: that's your copy of the project, keep it
+    say "Keeping /opt/lcd-dashboards: it's a git clone, not a copy made by install.sh"
+  elif [[ -f /opt/lcd-dashboards/webui/lcd_runner.py ]]; then
+    say "Deleting /opt/lcd-dashboards"
+    rm -rf /opt/lcd-dashboards
+  fi
+  say "Deleting /var/lib/lcd-dashboard and the lcd/lcdweb users"
   rm -rf /var/lib/lcd-dashboard
   for u in lcdweb lcd; do id "$u" >/dev/null 2>&1 && userdel "$u"; done
 fi

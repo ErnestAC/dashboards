@@ -49,6 +49,8 @@ DASH_DIR = os.path.abspath(os.environ.get("LCD_DASH_DIR", os.path.join(HERE, "..
 STATE_DIR = os.environ.get("LCD_STATE_DIR", "/var/lib/lcd-dashboard")
 BIND = os.environ.get("LCD_WEBUI_BIND", "0.0.0.0")
 PORT = int(os.environ.get("LCD_WEBUI_PORT", "8911"))
+
+
 def find_lcd_fb():
     """The SPI screen's framebuffer: the one whose driver is fbtft (named fb_<chip>,
     e.g. fb_ili9486). Without HDMI it is often /dev/fb0, not /dev/fb1."""
@@ -90,11 +92,13 @@ def check_password(pw):
     try:
         with open(PASSWORD_FILE) as f:
             algo, iters, salt, want = f.read().strip().split("$")
-    except (FileNotFoundError, ValueError):
+        if algo != "pbkdf2_sha256":
+            return False
+        got = hash_password(pw, bytes.fromhex(salt), int(iters)).split("$")[3]
+    except (OSError, ValueError):          # missing, unreadable (e.g. set as root) or corrupt
+        print(f"can't use {PASSWORD_FILE}; set it again with: install.sh --reset-password",
+              file=sys.stderr)
         return False
-    if algo != "pbkdf2_sha256":
-        return False
-    got = hash_password(pw, bytes.fromhex(salt), int(iters)).split("$")[3]
     return hmac.compare_digest(got, want)
 
 
@@ -108,6 +112,9 @@ def set_password():
     fd = os.open(PASSWORD_FILE + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(hash_password(pw) + "\n")
+    if os.geteuid() == 0:                  # run as root: the web UI's user must own it
+        st = os.stat(STATE_DIR)
+        os.chown(PASSWORD_FILE + ".tmp", st.st_uid, st.st_gid)
     os.replace(PASSWORD_FILE + ".tmp", PASSWORD_FILE)
     print(f"Password saved to {PASSWORD_FILE}")
 
@@ -151,7 +158,7 @@ def note_failure():
 
 # ------------------------------------------------------------- dashboards
 def valid_name(name):
-    return (bool(name) and "/" not in name and not name.startswith(".")
+    return (isinstance(name, str) and bool(name) and "/" not in name and not name.startswith(".")
             and name.endswith(".py") and os.path.isfile(os.path.join(DASH_DIR, name)))
 
 
@@ -183,12 +190,12 @@ def screen_file(sid, ext=".json"):
 
 
 def valid_custom(name):
-    sid = name[len("custom:"):] if name.startswith("custom:") else ""
+    sid = name[len("custom:"):] if isinstance(name, str) and name.startswith("custom:") else ""
     return bool(screens.ID_RE.match(sid)) and os.path.isfile(screen_file(sid))
 
 
 def load_screen(sid):
-    if not screens.ID_RE.match(sid or ""):
+    if not isinstance(sid, str) or not screens.ID_RE.match(sid):
         return None
     try:
         with open(screen_file(sid)) as f:
@@ -210,7 +217,7 @@ def list_screens():
         png = screen_file(sid, ".png")
         out.append({"name": "custom:" + sid, "id": sid, "title": layout["name"], "custom": True,
                     "desc": f"Made in the editor · {len(layout['widgets'])} items",
-                    "preview": int(os.path.getmtime(png)) if os.path.isfile(png) else None})
+                    "preview": os.stat(png).st_mtime_ns if os.path.isfile(png) else None})
     return sorted(out, key=lambda d: d["title"].lower())
 
 
@@ -224,6 +231,8 @@ def write_file(path, data, mode="wb"):
 
 def save_screen(req):
     """Save {id?, layout, preview}; returns the screen id. ValueError on bad input."""
+    if not isinstance(req, dict):
+        raise ValueError("not a save request")
     layout = screens.sanitize(req.get("layout"))
     preview = req.get("preview") or ""
     prefix = "data:image/png;base64,"
@@ -250,7 +259,7 @@ def save_screen(req):
 
 
 def delete_screen(sid):
-    if not screens.ID_RE.match(sid or "") or not os.path.isfile(screen_file(sid)):
+    if not isinstance(sid, str) or not screens.ID_RE.match(sid) or not os.path.isfile(screen_file(sid)):
         raise ValueError("no such screen")
     if read_active() == "custom:" + sid:
         raise ValueError("it's on the screen now; apply another dashboard first")
@@ -267,7 +276,7 @@ def list_dashboards():
     for n in names:
         p = preview_path(n)
         out.append({"name": n, "desc": describe(n),
-                    "preview": int(os.path.getmtime(p)) if os.path.isfile(p) else None})
+                    "preview": os.stat(p).st_mtime_ns if os.path.isfile(p) else None})
     return out
 
 
@@ -280,7 +289,7 @@ def read_active():
     try:
         with open(ACTIVE) as f:
             return f.read().strip()
-    except FileNotFoundError:
+    except OSError:
         return None
 
 
@@ -372,9 +381,12 @@ class Handler(BaseHTTPRequestHandler):
         return get_session(c[COOKIE].value if COOKIE in c else None)
 
     def body(self, limit=4096):
-        n = int(self.headers.get("Content-Length") or 0)
-        if n > limit:
-            raise ValueError("request too large")
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise ValueError("bad Content-Length")
+        if n < 0 or n > limit:             # a negative length would read until the client hangs up
+            raise ValueError("request too large" if n > limit else "bad Content-Length")
         return self.rfile.read(n).decode(errors="replace")
 
     # routes
@@ -456,7 +468,10 @@ class Handler(BaseHTTPRequestHandler):
             if login_locked():
                 return self.send(429, LOGIN_HTML.replace("<!--MSG-->", "Too many attempts. Wait a minute."),
                                  "text/html; charset=utf-8")
-            pw = parse_qs(self.body()).get("password", [""])[0]
+            try:
+                pw = parse_qs(self.body()).get("password", [""])[0]
+            except ValueError:
+                return self.send(400, "bad request")
             if check_password(pw):
                 token = new_session()
                 return self.redirect("/", {"Set-Cookie": f"{COOKIE}={token}; Path=/; HttpOnly; "
@@ -484,16 +499,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok": True, "id": sid, "name": "custom:" + sid})
         if url.path == "/api/screens/delete":
             try:
-                delete_screen(json.loads(self.body()).get("id"))
-            except (ValueError, AttributeError) as e:
+                req = json.loads(self.body())
+                delete_screen(req.get("id") if isinstance(req, dict) else None)
+            except ValueError as e:
                 return self.send_json({"ok": False, "error": str(e)}, 400)
             except OSError as e:
                 return self.send_json({"ok": False, "error": str(e)}, 500)
             return self.send_json({"ok": True})
         if url.path == "/api/apply":
             try:
-                name = json.loads(self.body()).get("name", "")
-            except (ValueError, AttributeError):
+                req = json.loads(self.body())
+                name = req.get("name", "") if isinstance(req, dict) else ""
+            except ValueError:
                 name = ""
             if not (valid_name(name) or valid_custom(name)):
                 return self.send_json({"ok": False, "error": "unknown dashboard"}, 400)
@@ -753,7 +770,7 @@ $("apply").onclick = async () => {
   const j = await r.json().catch(() => ({}));
   if (!r.ok || !j.ok) { setMsg("Could not apply: " + (j.error || r.status), "bad"); updateApply(); return; }
   pending = {name: selected, at: j.applied_at};
-  active = selected; renderGrid(); checkPending(); updateApply();
+  active = selected; renderGrid(); showPreview(); checkPending(); updateApply();
 };
 $("logout").onclick = async () => { await post("/logout"); location.reload(); };
 $("edit").onclick = () => { const d = find(selected); if (d && d.custom) location.href = "/editor?id=" + encodeURIComponent(d.id); };

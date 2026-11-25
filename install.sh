@@ -10,7 +10,8 @@
 #   --overlay LINE    exact dtoverlay line for your panel, instead of the PiScreen one
 #   --no-display      never touch the boot config, even if no LCD is found
 #   --unit NAME       take over an LCD service you already run, instead of adding one
-#   --yes             don't ask; accept the defaults
+#   --reset-password  choose a new web UI password without being asked first
+#   --yes             don't ask; accept the defaults (still asks for a password if none is set)
 #
 # What it does:
 #   1. installs Python Pillow, psutil and the fonts the dashboards use (apt)
@@ -26,7 +27,7 @@
 set -euo pipefail
 
 ARGS="$*"
-PORT=8911 DEFAULT=lcd_180.py ROTATE=90 ROTATE_SET=0 OVERLAY="" NO_DISPLAY=0 UNIT="" YES=0
+PORT=8911 DEFAULT=lcd_180.py ROTATE=90 ROTATE_SET=0 OVERLAY="" NO_DISPLAY=0 UNIT="" YES=0 RESET_PW=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --port) PORT="$2"; shift 2 ;;
@@ -35,8 +36,9 @@ while [[ $# -gt 0 ]]; do
     --overlay) OVERLAY="$2"; shift 2 ;;
     --no-display) NO_DISPLAY=1; shift ;;
     --unit) UNIT="$2"; shift 2 ;;
+    --reset-password) RESET_PW=1; shift ;;
     --yes|-y) YES=1; shift ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -61,6 +63,10 @@ ask()  {  # ask "question" -> 0 for yes; --yes answers yes, no terminal answers 
   [[ $YES -eq 1 ]] && return 0
   [[ -t 0 ]] || return 1
   local a; read -r -p "    $1 [Y/n] " a; [[ -z "$a" || "$a" =~ ^[Yy] ]]
+}
+ask_no() {  # like ask, but Enter means no; --yes or no terminal also answer no
+  [[ $YES -eq 1 || ! -t 0 ]] && return 1
+  local a; read -r -p "    $1 [y/N] " a; [[ "$a" =~ ^[Yy] ]]
 }
 
 [[ $EUID -eq 0 ]] || fail "run it with sudo:  sudo $0 $ARGS"
@@ -227,13 +233,30 @@ fi
 install -d -o "$WEB_USER" -g "$WEB_USER" -m 0755 "$STATE_DIR/screens"   # screens made in the editor
 [[ -s "$STATE_DIR/active" ]] || { echo "$DEFAULT" > "$STATE_DIR/active"; chown "$WEB_USER:" "$STATE_DIR/active"; }
 
-if [[ ! -s "$STATE_DIR/webui.passwd" ]]; then
+# The web UI password: always asked on a first install; on a reinstall or update
+# you're offered the chance to change it (or pass --reset-password).
+set_web_password() {
   say "Choose a password for the web UI (at least 8 characters)"
   until runuser -u "$WEB_USER" -- env LCD_STATE_DIR="$STATE_DIR" "$PY" "$WEBUI_DIR/lcd_webui.py" set-password; do
     [[ -t 0 ]] || fail "no terminal to ask for a password; run: sudo -u $WEB_USER LCD_STATE_DIR=$STATE_DIR $PY $WEBUI_DIR/lcd_webui.py set-password"
     echo "    Let's try that again."
   done
+}
+if [[ ! -s "$STATE_DIR/webui.passwd" ]]; then
+  [[ -t 0 ]] || fail "a web UI password is needed; run this from a terminal (ssh is fine)"
+  set_web_password
+elif [[ $RESET_PW -eq 1 ]]; then
+  [[ -t 0 ]] || fail "--reset-password needs a terminal to type the password in"
+  set_web_password
+else
+  say "Web UI password"
+  if ask_no "A password is already set. Change it?"; then
+    set_web_password
+  else
+    note "keeping the current password (change it later with: sudo $DEST/install.sh --reset-password)"
+  fi
 fi
+chown "$WEB_USER:" "$STATE_DIR/webui.passwd"; chmod 0600 "$STATE_DIR/webui.passwd"   # in case it was set as root
 
 # ---------------------------------------------------------------- services
 # LCD_FB_DEV=auto: the runner and web UI find the screen at start, so it works after a reboot
@@ -333,7 +356,7 @@ say "Done"
 echo "    Web UI:   http://${IP:-<pi-address>}:$PORT   (pick a dashboard and Apply, or design your own)"
 echo "    Screen:   $LCD_SERVICE, showing $(cat "$STATE_DIR/active")"
 echo "    Logs:     journalctl -u ${LCD_SERVICE%.service} -u lcd-webui -f"
-echo "    Password: sudo -u $WEB_USER LCD_STATE_DIR=$STATE_DIR $PY $WEBUI_DIR/lcd_webui.py set-password"
+echo "    Password: sudo $DEST/install.sh --reset-password"
 echo "    Remove:   sudo $DEST/uninstall.sh"
 if [[ $REBOOT -eq 1 ]]; then
   echo
