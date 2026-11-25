@@ -264,6 +264,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urlparse(self.path)
         s = self.session()
+        if url.path == "/favicon.svg":            # public, so the login page has it too
+            return self.send(200, FAVICON_SVG, "image/svg+xml", cache="public, max-age=86400")
         if url.path == "/":
             return self.send(200, APP_HTML.replace("__CSRF__", s["csrf"]) if s else LOGIN_HTML,
                              "text/html; charset=utf-8")
@@ -332,6 +334,16 @@ class Handler(BaseHTTPRequestHandler):
 
 
 # ------------------------------------------------------------------- pages
+# Browser-tab icon: a small screen showing a bar chart, in the UI's colours.
+FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<rect x="4" y="8" width="56" height="40" rx="7" fill="#171b23" stroke="#8a93a3" stroke-width="4"/>
+<rect x="14" y="28" width="9" height="12" rx="1.5" fill="#42a5f5"/>
+<rect x="27.5" y="18" width="9" height="22" rx="1.5" fill="#ef5350"/>
+<rect x="41" y="24" width="9" height="16" rx="1.5" fill="#66bb6a"/>
+<rect x="27" y="48" width="10" height="7" fill="#8a93a3"/>
+<rect x="17" y="54" width="30" height="6" rx="3" fill="#8a93a3"/>
+</svg>"""
+
 STYLE = """
 :root{--bg:#0b0d12;--panel:#171b23;--panel2:#1f2430;--line:#2a3040;--fg:#e6e8ec;--dim:#8a93a3;
 --red:#ef5350;--blue:#42a5f5;--green:#66bb6a;--amber:#ffb74d;color-scheme:dark}
@@ -346,6 +358,7 @@ button.primary{background:var(--red);color:#fff;font-weight:600}
 
 LOGIN_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>LCD Dashboards</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <style>""" + STYLE + """
 main{max-width:340px;margin:18vh auto 0;padding:0 16px}
 h1{font-size:20px;margin:0 0 4px}p{color:var(--dim);margin:0 0 20px}
@@ -361,6 +374,7 @@ button{width:100%}.msg{color:var(--red);min-height:1.5em;margin-top:10px}
 
 APP_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>LCD Dashboards</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <style>""" + STYLE + """
 header{display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid var(--line);
 background:var(--panel);position:sticky;top:0;z-index:2;flex-wrap:wrap}
