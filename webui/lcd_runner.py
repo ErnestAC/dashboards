@@ -3,7 +3,9 @@
 
 The LCD service runs this instead of a dashboard script directly. It reads
 the chosen script name from $LCD_STATE_DIR/active, runs that script as a
-child process and restarts it if it crashes. When the active file changes,
+child process and restarts it if it crashes. A name like "custom:<id>" is a
+screen made in the web UI's editor; it runs as lcd_screen.py with
+$LCD_STATE_DIR/screens/<id>.json. When the active file changes,
 it switches scripts. If a newly chosen script exits within GRACE seconds,
 the previous working script is restored and the error is reported in
 $LCD_STATE_DIR/status.json for the web UI.
@@ -16,6 +18,7 @@ Environment:
 """
 import collections
 import json
+import re
 import os
 import signal
 import subprocess
@@ -60,9 +63,31 @@ POLL = 1          # seconds between checks
 BACKOFF = 5       # seconds before restarting a script that crashed later on
 
 
+SCREENS_DIR = os.path.join(STATE_DIR, "screens")
+SCREEN_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+
+
+def screen_layout(name):
+    """For "custom:<id>" (a screen made in the web UI's editor): its layout file."""
+    sid = name[len("custom:"):]
+    return os.path.join(SCREENS_DIR, sid + ".json") if SCREEN_ID.match(sid) else None
+
+
 def valid(name):
-    return (bool(name) and "/" not in name and not name.startswith(".")
+    if not name:
+        return False
+    if name.startswith("custom:"):
+        path = screen_layout(name)
+        return bool(path) and os.path.isfile(path)
+    return ("/" not in name and not name.startswith(".")
             and name.endswith(".py") and os.path.isfile(os.path.join(DASH_DIR, name)))
+
+
+def command(name):
+    """How to run a dashboard: a script directly, or a saved screen through lcd_screen.py."""
+    if name.startswith("custom:"):
+        return [sys.executable, "-u", os.path.join(HERE, "lcd_screen.py"), screen_layout(name)]
+    return [sys.executable, "-u", os.path.join(DASH_DIR, name)]
 
 
 def write_atomic(path, data):
@@ -88,7 +113,7 @@ class Child:
         self.started = time.time()
         self.log = collections.deque(maxlen=25)
         self.proc = subprocess.Popen(
-            [sys.executable, "-u", os.path.join(DASH_DIR, name)],
+            command(name),
             cwd=DASH_DIR, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, errors="replace", start_new_session=True)
@@ -132,7 +157,7 @@ def main():
     while not stopping.is_set():
         want = read_active()
         if not valid(want or ""):
-            want = good or DEFAULT
+            want = good if valid(good or "") else DEFAULT
 
         # switch to a newly chosen script
         if child is None or want != child.name:

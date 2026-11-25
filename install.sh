@@ -18,7 +18,9 @@
 #   3. finds the 3.5" SPI screen; if there is none, offers to enable its driver
 #      in the boot config (a reboot is needed after that)
 #   4. adds lcd-dashboard.service (draws the screen) and lcd-webui.service (the page
-#      where you choose the dashboard), then asks you for a web UI password
+#      where you choose a dashboard or design your own), then asks for a web UI password
+# Your settings live in /var/lib/lcd-dashboard: the chosen dashboard, the password
+# hash and the screens you make in the editor (screens/). Running this again keeps them.
 # Pi-hole's own files, settings and services are never changed; the screen only
 # reads Pi-hole's query database. Undo everything with: sudo ./uninstall.sh
 set -euo pipefail
@@ -222,6 +224,7 @@ install -d -o "$WEB_USER" -g "$WEB_USER" -m 0755 "$STATE_DIR"
 if [[ "$RUN_AS" != root ]]; then      # the screen writes its status here too
   chgrp "$(id -gn "$RUN_AS")" "$STATE_DIR"; chmod 0775 "$STATE_DIR"
 fi
+install -d -o "$WEB_USER" -g "$WEB_USER" -m 0755 "$STATE_DIR/screens"   # screens made in the editor
 [[ -s "$STATE_DIR/active" ]] || { echo "$DEFAULT" > "$STATE_DIR/active"; chown "$WEB_USER:" "$STATE_DIR/active"; }
 
 if [[ ! -s "$STATE_DIR/webui.passwd" ]]; then
@@ -327,7 +330,7 @@ fi
 
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 say "Done"
-echo "    Web UI:   http://${IP:-<pi-address>}:$PORT   (pick a dashboard, then Apply)"
+echo "    Web UI:   http://${IP:-<pi-address>}:$PORT   (pick a dashboard and Apply, or design your own)"
 echo "    Screen:   $LCD_SERVICE, showing $(cat "$STATE_DIR/active")"
 echo "    Logs:     journalctl -u ${LCD_SERVICE%.service} -u lcd-webui -f"
 echo "    Password: sudo -u $WEB_USER LCD_STATE_DIR=$STATE_DIR $PY $WEBUI_DIR/lcd_webui.py set-password"

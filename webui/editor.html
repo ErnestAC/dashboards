@@ -1,0 +1,552 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Screen Editor</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<!-- Served by lcd_webui.py at /editor. Draws on a 480x320 canvas with the Pi's own
+     fonts, using the same rules as lcd_screen.py, so the LCD matches what you see. -->
+<style>
+:root{--bg:#0b0d12;--panel:#171b23;--panel2:#1f2430;--line:#2a3040;--fg:#e6e8ec;--dim:#8a93a3;
+--red:#ef5350;--blue:#42a5f5;--green:#66bb6a;--amber:#ffb74d;color-scheme:dark}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+button,input,select{font:inherit;color:var(--fg)}
+button{border:0;border-radius:8px;padding:8px 14px;cursor:pointer;background:var(--panel2)}
+button:hover:not(:disabled){filter:brightness(1.2)}button:disabled{opacity:.45;cursor:default}
+button.primary{background:var(--red);color:#fff;font-weight:600}
+input,select{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-width:0}
+input[type=color]{padding:2px;height:32px;width:44px}
+input[type=checkbox]{width:16px;height:16px}
+header{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--line);
+background:var(--panel);position:sticky;top:0;z-index:5;flex-wrap:wrap}
+header a{color:var(--dim);text-decoration:none;white-space:nowrap}header a:hover{color:var(--fg)}
+#name{font-size:16px;font-weight:600;width:220px;background:transparent;border-color:transparent}
+#name:hover,#name:focus{border-color:var(--line)}
+.spacer{flex:1}
+#msg{font-size:13px;color:var(--dim)}#msg.ok{color:var(--green)}#msg.bad{color:var(--red)}#msg.wait{color:var(--amber)}
+.layout{display:grid;grid-template-columns:110px minmax(0,1fr) 290px;gap:16px;padding:16px;max-width:1500px;margin:0 auto}
+@media (max-width:1000px){.layout{grid-template-columns:1fr}.tools{flex-direction:row!important;flex-wrap:wrap}}
+.tools{display:flex;flex-direction:column;gap:8px}
+.tools .h,.panel .h{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);font-weight:600;margin:4px 0}
+.tools button{text-align:left}
+.stagecol{min-width:0}
+.stage{position:relative;width:100%;max-width:960px;aspect-ratio:3/2;margin:0 auto;background:#000;
+box-shadow:0 0 0 6px #000,0 0 0 7px var(--line);border-radius:2px;touch-action:none;user-select:none}
+#cv{position:absolute;inset:0;width:100%;height:100%;image-rendering:pixelated;display:block}
+#overlay{position:absolute;inset:0;cursor:default}
+.selbox{position:absolute;outline:1.5px solid var(--blue);outline-offset:0;cursor:move;pointer-events:none}
+.hoverbox{position:absolute;outline:1px dashed rgba(66,165,245,.6);pointer-events:none}
+.handle{position:absolute;width:12px;height:12px;margin:-6px 0 0 -6px;background:#fff;border:2px solid var(--blue);
+border-radius:3px;pointer-events:auto}
+.hint{color:var(--dim);font-size:12px;text-align:center;margin:14px 0 0}
+.below{display:flex;justify-content:center;gap:18px;flex-wrap:wrap;margin-top:10px;color:var(--dim);font-size:13px}
+.below label{display:flex;align-items:center;gap:6px}
+.panel{background:var(--panel);border-radius:12px;padding:14px;align-self:start}
+.row{display:grid;grid-template-columns:86px 1fr;align-items:center;gap:8px;margin:7px 0}
+.row label{color:var(--dim);font-size:13px}
+.row .pair{display:flex;gap:6px;align-items:center}.row .pair>*{flex:1}
+.quad{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:6px 0 10px}
+.quad label{display:block;color:var(--dim);font-size:11px;text-align:center}
+.quad input{width:100%;text-align:center;padding:5px 2px}
+.btns{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0 4px}.btns button{padding:6px 10px;font-size:13px}
+.layers{margin-top:16px;border-top:1px solid var(--line);padding-top:10px}
+.layers ol{list-style:none;margin:0;padding:0;max-height:260px;overflow:auto}
+.layers li{padding:5px 8px;border-radius:6px;cursor:pointer;font-size:13px;display:flex;gap:8px;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.layers li:hover{background:var(--panel2)}.layers li.sel{background:#1d3550}
+.layers li .t{color:var(--dim);flex:none;width:56px}
+.layers li .d{overflow:hidden;text-overflow:ellipsis}
+.note{color:var(--dim);font-size:12px;margin:8px 0 0}
+</style></head><body>
+<header>
+ <a href="/" id="back">← Dashboards</a>
+ <input id="name" maxlength="40" aria-label="Screen name" spellcheck="false">
+ <button id="undo" title="Undo (Ctrl+Z)">Undo</button>
+ <button id="redo" title="Redo (Ctrl+Shift+Z)">Redo</button>
+ <span class="spacer"></span>
+ <span id="msg"></span>
+ <button id="save">Save</button>
+ <button id="apply" class="primary">Save &amp; show on screen</button>
+</header>
+<div class="layout">
+ <div class="tools" id="tools"><div class="h">Add</div></div>
+ <div class="stagecol">
+  <div class="stage" id="stage"><canvas id="cv" width="480" height="320"></canvas><div id="overlay"></div></div>
+  <div class="below">
+   <label><input type="checkbox" id="snap" checked> Snap to 4 px</label>
+   <span>Values shown are sample data</span>
+  </div>
+  <p class="hint">Click to select · drag to move · drag a handle to resize · arrows nudge (Shift = 10 px) ·
+   Delete removes · Ctrl+D duplicates · Ctrl+Z undoes</p>
+ </div>
+ <div class="panel" id="panel"></div>
+</div>
+<script>
+"use strict";
+const CSRF = "__CSRF__";
+const $ = id => document.getElementById(id);
+const cv = $("cv"), ctx = cv.getContext("2d"), overlay = $("overlay");
+const NAMES = {text: "Text", rect: "Box", bar: "Bar", ring: "Ring", chart: "24 h chart", list: "List"};
+const HELP = {
+  text: "Type text; values in {braces} are filled in live on the screen.",
+  rect: "A filled panel. Put it under other items to group them.",
+  bar: "A bar that fills with a percentage.",
+  ring: "A ring that fills with a percentage.",
+  chart: "Queries per hour for the last 24 hours, blocked part on top.",
+  list: "Rows of domains or clients; the box height sets how many rows fit.",
+};
+let META, layout, sid = new URLSearchParams(location.search).get("id");
+let sel = -1, saved = "", snap = "", past = [], future = [], hover = -1;
+
+// ------------------------------------------------------------ helpers
+function el(tag, props, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === "class") e.className = v; else if (k.startsWith("on")) e[k] = v; else e[k] = v;
+  }
+  for (const k of kids) if (k != null) e.append(k);
+  return e;
+}
+const clone = o => JSON.parse(JSON.stringify(o));
+const rnd = v => Math.floor(v + 0.5);
+function setMsg(t, cls) { $("msg").textContent = t; $("msg").className = cls || ""; }
+function post(url, body) {
+  return fetch(url, {method: "POST", headers: {"Content-Type": "application/json", "X-CSRF": CSRF},
+                     body: JSON.stringify(body)});
+}
+
+// ----------------------------------------------- drawing (mirrors lcd_screen.py)
+const fontCss = (face, size) => `${size}px "lcd-${face}", sans-serif`;
+const metricText = k => (META.metrics[k] || [k, ""])[1];
+const fillTpl = t => t.replace(/\{(\w+)\}/g, (m, k) => k in META.metrics ? metricText(k) : m);
+function fit(s, maxw) {
+  if (ctx.measureText(s).width <= maxw) return s;
+  while (s && ctx.measureText(s + "…").width > maxw) s = s.slice(0, -1);
+  return s ? s + "…" : "";
+}
+function roundedPath(x, y, w, h, r) {
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h);
+}
+function rounded(x, y, w, h, r, fill, outline, ow) {
+  if (w <= 0 || h <= 0) return;
+  r = Math.max(0, Math.min(r, Math.floor(w / 2), Math.floor(h / 2)));
+  if (fill) { ctx.fillStyle = fill; roundedPath(x, y, w, h, r); ctx.fill(); }
+  if (outline && ow) {
+    ctx.strokeStyle = outline; ctx.lineWidth = ow;
+    roundedPath(x + ow / 2, y + ow / 2, w - ow, h - ow, Math.max(0, r - ow / 2)); ctx.stroke();
+  }
+}
+function textAt(s, x, y, align) {   // y is the top (ascender line), like PIL's anchor "la"
+  ctx.textAlign = align; ctx.textBaseline = "alphabetic";
+  const m = ctx.measureText(s);
+  const asc = m.fontBoundingBoxAscent != null ? m.fontBoundingBoxAscent : parseFloat(ctx.font) * 0.93;
+  ctx.fillText(s, x, y + asc);
+}
+function drawWidget(w) {
+  const {x, y, type: t} = w, ww = w.w, hh = w.h;
+  if (t === "rect") {
+    rounded(x, y, ww, hh, w.radius, w.color, w.outline_w ? w.outline : null, w.outline_w);
+  } else if (t === "text") {
+    ctx.font = fontCss(w.font, w.size); ctx.fillStyle = w.color;
+    const s = fit(fillTpl(w.text), ww);
+    textAt(s, w.align === "center" ? x + ww / 2 : w.align === "right" ? x + ww : x, y, w.align);
+  } else if (t === "bar") {
+    const r = Math.min(w.radius, Math.floor(hh / 2));
+    rounded(x, y, ww, hh, r, w.track);
+    const fw = rnd(ww * Math.max(0, Math.min(100, META.percents[w.metric][1])) / 100);
+    if (fw > 0) rounded(x, y, fw, hh, Math.min(r, Math.floor(fw / 2)), w.color);
+  } else if (t === "ring") {
+    const side = Math.min(ww, hh);
+    const bx = x + Math.floor((ww - side) / 2), by = y + Math.floor((hh - side) / 2);
+    const th = Math.max(1, Math.min(w.thickness, Math.floor(side / 2)));
+    const cx = bx + side / 2, cy = by + side / 2, r = side / 2 - th / 2;
+    ctx.lineWidth = th; ctx.lineCap = "butt";
+    ctx.strokeStyle = w.track; ctx.beginPath(); ctx.arc(cx, cy, r, 0, 2 * Math.PI); ctx.stroke();
+    const sweep = 2 * Math.PI * Math.max(0, Math.min(100, META.percents[w.metric][1])) / 100;
+    if (sweep > 0) {
+      ctx.strokeStyle = w.color; ctx.beginPath();
+      ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + sweep); ctx.stroke();
+    }
+    if (w.show_value) {
+      ctx.font = fontCss("sans", Math.max(6, rnd(side * 0.22))); ctx.fillStyle = w.text_color;
+      // centred between ascender and descender, like PIL's anchor "mm"
+      ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+      const s = metricText(w.metric), m = ctx.measureText(s);
+      const asc = m.fontBoundingBoxAscent != null ? m.fontBoundingBoxAscent : parseFloat(ctx.font) * 0.93;
+      const desc = m.fontBoundingBoxDescent != null ? m.fontBoundingBoxDescent : parseFloat(ctx.font) * 0.24;
+      ctx.fillText(s, cx, cy + (asc - desc) / 2);
+    }
+  } else if (t === "chart") {
+    const hours = META.sample.hourly, gap = ww >= 120 ? 2 : 1, bw = (ww - 23 * gap) / 24;
+    const top = Math.max(1, ...hours.map(h => h[0]));
+    hours.forEach(([n, b], i) => {
+      const hn = rnd(n / top * hh), hb = rnd(b / top * hh);
+      const x0 = rnd(x + i * (bw + gap)), x1 = rnd(x + i * (bw + gap) + bw) - 1;
+      if (x1 < x0) return;
+      if (hn > 0) { ctx.fillStyle = w.color; ctx.fillRect(x0, y + hh - hn, x1 - x0 + 1, hn); }
+      if (hb > 0) { ctx.fillStyle = w.color2; ctx.fillRect(x0, y + hh - hn, x1 - x0 + 1, hb); }
+    });
+  } else if (t === "list") {
+    ctx.font = fontCss(w.font, w.size);
+    const lh = rnd(w.size * 1.4), rows = Math.max(1, Math.floor(hh / lh));
+    META.sample.lists[w.source].slice(0, rows).forEach(([label, count], i) => {
+      const ly = y + i * lh;
+      let room = ww;
+      if (count != null) {
+        const c = count.toLocaleString("en-US");
+        ctx.fillStyle = w.color2; textAt(c, x + ww, ly, "right");
+        room = ww - ctx.measureText(c).width - 8;
+      }
+      ctx.fillStyle = w.color; textAt(fit(String(label), room), x, ly, "left");
+    });
+  }
+}
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = layout.bg; ctx.fillRect(0, 0, 480, 320);
+  for (const w of layout.widgets) { ctx.save(); try { drawWidget(w); } catch (e) { console.warn(e); } ctx.restore(); }
+  drawOverlay();
+}
+
+// ------------------------------------------------------ selection overlay
+const HANDLES = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
+function scale() { return cv.clientWidth / 480; }
+function drawOverlay() {
+  overlay.replaceChildren();
+  const k = scale();
+  const box = (w, cls) => el("div", {class: cls}, null);
+  if (hover >= 0 && hover !== sel && layout.widgets[hover]) {
+    const w = layout.widgets[hover], b = box(w, "hoverbox");
+    Object.assign(b.style, {left: w.x * k + "px", top: w.y * k + "px", width: w.w * k + "px", height: w.h * k + "px"});
+    overlay.append(b);
+  }
+  const w = layout.widgets[sel];
+  if (!w) return;
+  const b = box(w, "selbox");
+  Object.assign(b.style, {left: w.x * k + "px", top: w.y * k + "px", width: w.w * k + "px", height: w.h * k + "px"});
+  overlay.append(b);
+  for (const h of HANDLES) {
+    const hx = h.includes("w") ? w.x : h.includes("e") ? w.x + w.w : w.x + w.w / 2;
+    const hy = h.includes("n") ? w.y : h.includes("s") ? w.y + w.h : w.y + w.h / 2;
+    const d = el("div", {class: "handle"});
+    d.dataset.h = h;
+    Object.assign(d.style, {left: hx * k + "px", top: hy * k + "px", cursor: h + "-resize"});
+    overlay.append(d);
+  }
+}
+function point(ev) {
+  const r = overlay.getBoundingClientRect(), k = r.width / 480;
+  return {x: (ev.clientX - r.left) / k, y: (ev.clientY - r.top) / k};
+}
+function hit(p) {
+  for (let i = layout.widgets.length - 1; i >= 0; i--) {
+    const w = layout.widgets[i];
+    if (p.x >= w.x && p.x < w.x + w.w && p.y >= w.y && p.y < w.y + w.h) return i;
+  }
+  return -1;
+}
+const grid = v => $("snap").checked ? Math.round(v / 4) * 4 : Math.round(v);
+
+let drag = null;
+overlay.addEventListener("pointerdown", ev => {
+  const p = point(ev);
+  const handle = ev.target.dataset && ev.target.dataset.h;
+  if (!handle) {
+    const i = hit(p);
+    if (i !== sel) select(i);
+    if (i < 0) return;
+  }
+  const w = layout.widgets[sel];
+  drag = {handle, p, orig: {x: w.x, y: w.y, w: w.w, h: w.h}, moved: false};
+  overlay.setPointerCapture(ev.pointerId);
+  ev.preventDefault();
+});
+overlay.addEventListener("pointermove", ev => {
+  const p = point(ev);
+  if (!drag) {
+    const i = hit(p);
+    if (i !== hover) { hover = i; drawOverlay(); }
+    overlay.style.cursor = i >= 0 ? "move" : "default";
+    return;
+  }
+  const w = layout.widgets[sel], o = drag.orig;
+  const dx = p.x - drag.p.x, dy = p.y - drag.p.y;
+  if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 2) return;
+  drag.moved = true;
+  const h = drag.handle;
+  if (!h) {
+    w.x = grid(o.x + dx); w.y = grid(o.y + dy);
+  } else {
+    let x0 = o.x, y0 = o.y, x1 = o.x + o.w, y1 = o.y + o.h;
+    if (h.includes("w")) x0 = Math.min(grid(o.x + dx), x1 - 1);
+    if (h.includes("e")) x1 = Math.max(grid(x1 + dx), x0 + 1);
+    if (h.includes("n")) y0 = Math.min(grid(o.y + dy), y1 - 1);
+    if (h.includes("s")) y1 = Math.max(grid(y1 + dy), y0 + 1);
+    Object.assign(w, {x: x0, y: y0, w: x1 - x0, h: y1 - y0});
+  }
+  draw(); syncGeometry();
+});
+function endDrag() { if (drag && drag.moved) commit(); drag = null; }
+overlay.addEventListener("pointerup", endDrag);
+overlay.addEventListener("pointercancel", endDrag);
+overlay.addEventListener("pointerleave", () => { if (!drag && hover >= 0) { hover = -1; drawOverlay(); } });
+window.addEventListener("resize", drawOverlay);
+
+// -------------------------------------------------------------- history
+function commit() {
+  const now = JSON.stringify(layout);
+  if (now === snap) return;
+  past.push(snap); if (past.length > 200) past.shift();
+  snap = now; future = [];
+  updateButtons();
+}
+function restore(s) {
+  snap = s; layout = JSON.parse(s);
+  if (sel >= layout.widgets.length) sel = layout.widgets.length - 1;
+  $("name").value = layout.name;
+  draw(); renderPanel(); updateButtons();
+}
+function undo() { if (past.length) { future.push(snap); restore(past.pop()); } }
+function redo() { if (future.length) { past.push(snap); restore(future.pop()); } }
+function updateButtons() {
+  $("undo").disabled = !past.length; $("redo").disabled = !future.length;
+  const dirty = snap !== saved || !sid;      // a new screen stays "unsaved" until saved
+  $("save").textContent = dirty ? "Save" : "Saved";
+  document.title = (dirty ? "• " : "") + "Screen Editor";
+}
+
+// ------------------------------------------------------------ editing
+function select(i) { sel = i; hover = -1; drawOverlay(); renderPanel(); }
+function addWidget(type) {
+  if (layout.widgets.length >= META.max_widgets) return setMsg(`At most ${META.max_widgets} items`, "bad");
+  const w = clone(META.new[type]);
+  // don't stack new items exactly on top of each other
+  while (layout.widgets.some(o => o.x === w.x && o.y === w.y)) { w.x += 12; w.y += 12; }
+  layout.widgets.push(w); commit(); draw(); select(layout.widgets.length - 1);
+}
+function removeSel() {
+  if (sel < 0) return;
+  layout.widgets.splice(sel, 1); sel = Math.min(sel, layout.widgets.length - 1);
+  commit(); draw(); renderPanel();
+}
+function duplicateSel() {
+  if (sel < 0 || layout.widgets.length >= META.max_widgets) return;
+  const w = clone(layout.widgets[sel]); w.x += 8; w.y += 8;
+  layout.widgets.splice(sel + 1, 0, w); commit(); draw(); select(sel + 1);
+}
+function moveSel(by) {        // +1 = forward (drawn later), -1 = back
+  const j = sel + by;
+  if (sel < 0 || j < 0 || j >= layout.widgets.length) return;
+  const ws = layout.widgets; [ws[sel], ws[j]] = [ws[j], ws[sel]];
+  sel = j; commit(); draw(); renderPanel();
+}
+
+// --------------------------------------------------------- properties
+function clampProp(type, key, v) {
+  const spec = key in GEOM ? GEOM[key] : META.types[type][key];
+  if (spec[0] === "int") { v = parseInt(v, 10); if (isNaN(v)) v = spec[1]; return Math.max(spec[2], Math.min(spec[3], v)); }
+  return v;
+}
+const GEOM = {x: ["int", 0, -480, 960], y: ["int", 0, -320, 640], w: ["int", 100, 1, 960], h: ["int", 40, 1, 640]};
+function field(label, input) { return el("div", {class: "row"}, el("label", {textContent: label}), input); }
+function bind(input, w, key, read) {
+  input.oninput = () => { w[key] = clampProp(w.type, key, read ? read(input) : input.value); draw(); };
+  input.onchange = () => { w[key] = clampProp(w.type, key, read ? read(input) : input.value); draw(); commit(); renderPanel(); };
+  return input;
+}
+function numberInput(w, key) {
+  const spec = META.types[w.type][key];
+  return bind(el("input", {type: "number", value: w[key], min: spec[2], max: spec[3]}), w, key);
+}
+function colorInput(w, key) { return bind(el("input", {type: "color", value: w[key]}), w, key); }
+function selectInput(w, key, options) {
+  const s = el("select", {});
+  for (const [v, label] of options) s.append(el("option", {value: v, textContent: label, selected: v === w[key]}));
+  return bind(s, w, key);
+}
+const FONT_LABELS = {sans: "Sans (Roboto)", mono: "Mono (DejaVu)"};
+function fontInput(w) { return selectInput(w, "font", META.fonts.map(f => [f, FONT_LABELS[f] || f])); }
+
+function syncGeometry() {
+  const w = layout.widgets[sel];
+  if (!w) return;
+  for (const k of ["x", "y", "w", "h"]) { const i = $("g-" + k); if (i && document.activeElement !== i) i.value = w[k]; }
+}
+
+function describe(w) {
+  if (w.type === "text") return w.text;
+  if (w.type === "bar" || w.type === "ring") return META.percents[w.metric][0];
+  if (w.type === "list") return META.sources[w.source];
+  if (w.type === "rect") return w.color;
+  return "";
+}
+
+function renderPanel() {
+  const p = $("panel"); p.replaceChildren();
+  const w = layout.widgets[sel];
+  if (!w) {
+    p.append(el("div", {class: "h", textContent: "Screen"}));
+    const bg = el("input", {type: "color", value: layout.bg});
+    bg.oninput = () => { layout.bg = bg.value; draw(); };
+    bg.onchange = () => { layout.bg = bg.value; draw(); commit(); };
+    p.append(field("Background", bg));
+    p.append(el("p", {class: "note", textContent: "Add items with the buttons on the left, then click one to change it."}));
+    const clear = el("button", {textContent: "Remove everything", onclick: () => {
+      if (layout.widgets.length && confirm("Remove every item from this screen?")) {
+        layout.widgets = []; sel = -1; commit(); draw(); renderPanel();
+      }
+    }});
+    p.append(el("div", {class: "btns"}, clear));
+  } else {
+    p.append(el("div", {class: "h", textContent: NAMES[w.type]}));
+    p.append(el("p", {class: "note", textContent: HELP[w.type]}));
+    const quad = el("div", {class: "quad"});
+    for (const k of ["x", "y", "w", "h"]) {
+      const i = el("input", {type: "number", id: "g-" + k, value: w[k]});
+      i.oninput = () => { w[k] = clampProp(w.type, k, i.value); draw(); };
+      i.onchange = () => { w[k] = clampProp(w.type, k, i.value); draw(); commit(); syncGeometry(); };
+      quad.append(el("div", {}, el("label", {textContent: {x: "X", y: "Y", w: "Width", h: "Height"}[k]}), i));
+    }
+    p.append(quad);
+
+    if (w.type === "text") {
+      const t = bind(el("input", {type: "text", value: w.text, maxLength: 200}), w, "text");
+      p.append(field("Text", t));
+      const ins = el("select", {});
+      ins.append(el("option", {value: "", textContent: "Insert a live value…"}));
+      for (const [k, [label, sample]] of Object.entries(META.metrics))
+        ins.append(el("option", {value: k, textContent: `${label}  (${sample})`}));
+      ins.onchange = () => {
+        if (!ins.value) return;
+        const tok = "{" + ins.value + "}";
+        const a = t.selectionStart != null ? t.selectionStart : t.value.length;
+        const b = t.selectionEnd != null ? t.selectionEnd : a;
+        t.value = (t.value.slice(0, a) + tok + t.value.slice(b)).slice(0, 200);
+        w.text = t.value; ins.value = ""; draw(); commit();
+      };
+      p.append(field("", ins));
+      p.append(field("Font", fontInput(w)));
+      p.append(field("Size", numberInput(w, "size")));
+      p.append(field("Color", colorInput(w, "color")));
+      p.append(field("Align", selectInput(w, "align", [["left", "Left"], ["center", "Center"], ["right", "Right"]])));
+    } else if (w.type === "rect") {
+      p.append(field("Color", colorInput(w, "color")));
+      p.append(field("Corners", numberInput(w, "radius")));
+      p.append(field("Outline", el("div", {class: "pair"}, colorInput(w, "outline"), numberInput(w, "outline_w"))));
+      p.append(el("p", {class: "note", textContent: "Outline width 0 means no outline."}));
+    } else if (w.type === "bar" || w.type === "ring") {
+      p.append(field("Shows", selectInput(w, "metric", Object.entries(META.percents).map(([k, v]) => [k, v[0]]))));
+      p.append(field("Fill", colorInput(w, "color")));
+      p.append(field("Track", colorInput(w, "track")));
+      if (w.type === "bar") p.append(field("Corners", numberInput(w, "radius")));
+      if (w.type === "ring") {
+        p.append(field("Thickness", numberInput(w, "thickness")));
+        const cb = bind(el("input", {type: "checkbox", checked: w.show_value}), w, "show_value", i => i.checked);
+        p.append(field("Value", el("div", {class: "pair"}, cb, colorInput(w, "text_color"))));
+      }
+    } else if (w.type === "chart") {
+      p.append(field("Allowed", colorInput(w, "color")));
+      p.append(field("Blocked", colorInput(w, "color2")));
+    } else if (w.type === "list") {
+      p.append(field("Shows", selectInput(w, "source", Object.entries(META.sources))));
+      p.append(field("Font", fontInput(w)));
+      p.append(field("Size", numberInput(w, "size")));
+      p.append(field("Names", colorInput(w, "color")));
+      p.append(field("Counts", colorInput(w, "color2")));
+    }
+    p.append(el("div", {class: "btns"},
+      el("button", {textContent: "Forward", title: "Draw on top of the next item", onclick: () => moveSel(1)}),
+      el("button", {textContent: "Back", title: "Draw under the previous item", onclick: () => moveSel(-1)}),
+      el("button", {textContent: "Duplicate", onclick: duplicateSel}),
+      el("button", {textContent: "Delete", onclick: removeSel})));
+  }
+
+  // layers, topmost first
+  const box = el("div", {class: "layers"}, el("div", {class: "h", textContent: `Items (${layout.widgets.length})`}));
+  const ol = el("ol", {});
+  for (let i = layout.widgets.length - 1; i >= 0; i--) {
+    const x = layout.widgets[i];
+    const li = el("li", {class: i === sel ? "sel" : "", title: describe(x)},
+                  el("span", {class: "t", textContent: NAMES[x.type]}), el("span", {class: "d", textContent: describe(x)}));
+    li.onclick = () => select(i);
+    li.onmouseenter = () => { hover = i; drawOverlay(); };
+    li.onmouseleave = () => { hover = -1; drawOverlay(); };
+    ol.append(li);
+  }
+  if (!layout.widgets.length) ol.append(el("li", {textContent: "Nothing yet"}));
+  box.append(ol); p.append(box);
+}
+
+// -------------------------------------------------------------- keyboard
+document.addEventListener("keydown", ev => {
+  const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
+  const mod = ev.ctrlKey || ev.metaKey;
+  if (mod && ev.key.toLowerCase() === "s") { ev.preventDefault(); save(false); return; }
+  if (typing) return;
+  if (mod && ev.key.toLowerCase() === "z") { ev.preventDefault(); ev.shiftKey ? redo() : undo(); return; }
+  if (mod && ev.key.toLowerCase() === "y") { ev.preventDefault(); redo(); return; }
+  if (mod && ev.key.toLowerCase() === "d") { ev.preventDefault(); duplicateSel(); return; }
+  if (ev.key === "Escape") { select(-1); return; }
+  const w = layout.widgets[sel];
+  if (!w) return;
+  if (ev.key === "Delete" || ev.key === "Backspace") { ev.preventDefault(); removeSel(); return; }
+  const step = ev.shiftKey ? 10 : 1;
+  const d = {ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step]}[ev.key];
+  if (d) { ev.preventDefault(); w.x += d[0]; w.y += d[1]; draw(); syncGeometry(); commit(); }
+});
+
+// ----------------------------------------------------------------- save
+async function save(andApply) {
+  layout.name = $("name").value.trim() || "My screen";
+  const keep = sel; sel = -1; draw();                 // the picture is taken without the selection
+  const preview = cv.toDataURL("image/png");
+  sel = keep; drawOverlay();
+  setMsg("Saving…", "wait");
+  try {
+    const r = await post("/api/screens", {id: sid, layout, preview});
+    if (r.status === 401 || r.status === 403) { setMsg("Signed out: sign in again in another tab, then save.", "bad"); return; }
+    const j = await r.json();
+    if (!j.ok) { setMsg("Not saved: " + j.error, "bad"); return; }
+    sid = j.id; saved = snap = JSON.stringify(layout); updateButtons();
+    window.history.replaceState(null, "", "/editor?id=" + encodeURIComponent(sid));
+    if (!andApply) { setMsg("Saved", "ok"); return; }
+    const a = await post("/api/apply", {name: j.name});
+    const k = await a.json().catch(() => ({}));
+    setMsg(k.ok ? "Saved and sent to the screen" : "Saved, but not applied: " + (k.error || a.status), k.ok ? "ok" : "bad");
+  } catch (e) { setMsg("Not saved: the Pi didn't answer", "bad"); }
+}
+$("save").onclick = () => save(false);
+$("apply").onclick = () => save(true);
+$("undo").onclick = undo; $("redo").onclick = redo;
+$("name").oninput = () => { layout.name = $("name").value; };
+$("name").onchange = () => { layout.name = $("name").value.trim() || "My screen"; commit(); };
+window.addEventListener("beforeunload", ev => { if (snap !== saved) { ev.preventDefault(); ev.returnValue = ""; } });
+
+// ----------------------------------------------------------------- start
+(async () => {
+  const r = await fetch("/api/screen-meta");
+  if (r.status === 401) { location.href = "/"; return; }
+  META = await r.json();
+  try {
+    await Promise.all(META.fonts.map(async f => {
+      const face = new FontFace("lcd-" + f, `url(/fonts/${f}.ttf)`);
+      document.fonts.add(await face.load());
+    }));
+  } catch (e) { setMsg("The Pi's fonts didn't load; text may look a little different here", "bad"); }
+
+  if (sid) {
+    const s = await fetch("/api/screens/" + encodeURIComponent(sid));
+    if (s.ok) layout = await s.json();
+    else { setMsg("That screen wasn't found; starting a new one", "bad"); sid = null; }
+  }
+  if (!layout) layout = clone(META.starter);
+  saved = snap = JSON.stringify(layout);
+  $("name").value = layout.name;
+
+  const tools = $("tools");
+  for (const t of ["text", "rect", "bar", "ring", "chart", "list"])
+    tools.append(el("button", {textContent: "+ " + NAMES[t], title: HELP[t], onclick: () => addWidget(t)}));
+  draw(); renderPanel(); updateButtons();
+})();
+</script></body></html>

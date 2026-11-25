@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Password-protected web UI to preview and switch the LCD dashboard.
+"""Password-protected web UI to preview and switch the LCD dashboard, and to design
+your own screens.
 
 usage:
   lcd_webui.py                 run the web server
@@ -11,6 +12,11 @@ on the physical screen now (read back from the framebuffer), and switches
 the dashboard by writing the script name to $LCD_STATE_DIR/active, which
 lcd_runner.py picks up. Only the applied dashboard ever renders, on the device.
 
+The screen editor (/editor, editor.html) draws on a 480x320 canvas in the browser
+with the Pi's own fonts. Saved screens are layout data, not code (format and checks
+in screens.py): $LCD_STATE_DIR/screens/<id>.json plus <id>.png, the editor's picture
+of it. They are applied as "custom:<id>" and drawn on the LCD by lcd_screen.py.
+
 Environment:
   LCD_DASH_DIR    folder with the dashboard scripts (default: parent of this file)
   LCD_STATE_DIR   shared state folder (default: /var/lib/lcd-dashboard)
@@ -19,6 +25,7 @@ Environment:
   LCD_FB_DEV      framebuffer for the live view (default: auto, the SPI screen)
 """
 import ast
+import base64
 import getpass
 import hashlib
 import hmac
@@ -33,6 +40,9 @@ import time
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+
+sys.dont_write_bytecode = True
+import screens  # noqa: E402  (webui/screens.py: the saved-screen format)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DASH_DIR = os.path.abspath(os.environ.get("LCD_DASH_DIR", os.path.join(HERE, "..")))
@@ -60,6 +70,9 @@ if FB_DEV == "auto":
 ACTIVE = os.path.join(STATE_DIR, "active")
 STATUS = os.path.join(STATE_DIR, "status.json")
 PASSWORD_FILE = os.path.join(STATE_DIR, "webui.passwd")
+SCREENS_DIR = os.path.join(STATE_DIR, "screens")      # screens made in the editor
+EDITOR_FILE = os.path.join(HERE, "editor.html")
+PNG_MAX = 1024 * 1024
 
 SESSION_TTL = 7 * 86400
 COOKIE = "lcd_session"
@@ -160,6 +173,92 @@ def describe(name):
     desc = doc.strip().splitlines()[0] if doc.strip() else ""
     _desc_cache[name] = (mtime, desc)
     return desc
+
+
+# ---------------------------------------------------------- user screens
+# Saved as SCREENS_DIR/<id>.json (layout, see screens.py) and <id>.png (the editor's
+# picture of it). On the screen they're named "custom:<id>".
+def screen_file(sid, ext=".json"):
+    return os.path.join(SCREENS_DIR, sid + ext)
+
+
+def valid_custom(name):
+    sid = name[len("custom:"):] if name.startswith("custom:") else ""
+    return bool(screens.ID_RE.match(sid)) and os.path.isfile(screen_file(sid))
+
+
+def load_screen(sid):
+    if not screens.ID_RE.match(sid or ""):
+        return None
+    try:
+        with open(screen_file(sid)) as f:
+            return screens.sanitize(json.load(f))
+    except (OSError, ValueError):
+        return None
+
+
+def list_screens():
+    try:
+        ids = [f[:-5] for f in os.listdir(SCREENS_DIR) if f.endswith(".json") and screens.ID_RE.match(f[:-5])]
+    except FileNotFoundError:
+        return []
+    out = []
+    for sid in ids:
+        layout = load_screen(sid)
+        if not layout:
+            continue
+        png = screen_file(sid, ".png")
+        out.append({"name": "custom:" + sid, "id": sid, "title": layout["name"], "custom": True,
+                    "desc": f"Made in the editor · {len(layout['widgets'])} items",
+                    "preview": int(os.path.getmtime(png)) if os.path.isfile(png) else None})
+    return sorted(out, key=lambda d: d["title"].lower())
+
+
+def write_file(path, data, mode="wb"):
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, mode) as f:
+        f.write(data)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def save_screen(req):
+    """Save {id?, layout, preview}; returns the screen id. ValueError on bad input."""
+    layout = screens.sanitize(req.get("layout"))
+    preview = req.get("preview") or ""
+    prefix = "data:image/png;base64,"
+    if not isinstance(preview, str) or not preview.startswith(prefix):
+        raise ValueError("missing preview image")
+    try:
+        png = base64.b64decode(preview[len(prefix):], validate=True)
+    except ValueError:
+        raise ValueError("bad preview image")
+    if len(png) > PNG_MAX or not png.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("bad preview image")
+    os.makedirs(SCREENS_DIR, exist_ok=True)
+    sid = req.get("id")
+    if not (isinstance(sid, str) and screens.ID_RE.match(sid) and os.path.isfile(screen_file(sid))):
+        if len(list_screens()) >= screens.MAX_SCREENS:
+            raise ValueError(f"you already have {screens.MAX_SCREENS} screens; delete one first")
+        base = sid = screens.slug(layout["name"])
+        n = 2
+        while os.path.exists(screen_file(sid)):
+            sid = f"{base}-{n}"; n += 1
+    write_file(screen_file(sid, ".png"), png)
+    write_file(screen_file(sid), json.dumps(layout, indent=1), "w")
+    return sid
+
+
+def delete_screen(sid):
+    if not screens.ID_RE.match(sid or "") or not os.path.isfile(screen_file(sid)):
+        raise ValueError("no such screen")
+    if read_active() == "custom:" + sid:
+        raise ValueError("it's on the screen now; apply another dashboard first")
+    for ext in (".json", ".png"):
+        try:
+            os.remove(screen_file(sid, ext))
+        except FileNotFoundError:
+            pass
 
 
 def list_dashboards():
@@ -274,7 +373,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def body(self, limit=4096):
         n = int(self.headers.get("Content-Length") or 0)
-        return self.rfile.read(min(n, limit)).decode(errors="replace")
+        if n > limit:
+            raise ValueError("request too large")
+        return self.rfile.read(n).decode(errors="replace")
 
     # routes
     def do_GET(self):
@@ -293,10 +394,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, APP_HTML.replace("__CSRF__", s["csrf"]) if s else LOGIN_HTML,
                              "text/html; charset=utf-8")
         if not s:
+            if url.path == "/editor":
+                return self.redirect("/")
             return self.send(401, "login required")
         if url.path == "/api/dashboards":
             return self.send_json({"host": socket.gethostname(), "active": read_active(),
-                                   "status": read_status(), "dashboards": list_dashboards()})
+                                   "status": read_status(), "dashboards": list_dashboards(),
+                                   "screens": list_screens()})
         if url.path == "/api/status":
             return self.send_json({"active": read_active(), "status": read_status()})
         if url.path.startswith("/preview/") and url.path.endswith(".png"):
@@ -309,6 +413,35 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 return self.send(404, "no example image for this dashboard")
             # static file: let the browser keep it; ?v=<mtime> busts the cache when it changes
+            return self.send(200, png, "image/png", cache="private, max-age=86400")
+        if url.path == "/editor":
+            try:
+                with open(EDITOR_FILE) as f:
+                    page = f.read()
+            except OSError:
+                return self.send(404, "editor.html is missing")
+            return self.send(200, page.replace("__CSRF__", s["csrf"]), "text/html; charset=utf-8")
+        if url.path == "/api/screen-meta":
+            return self.send_json(screens.meta())
+        if url.path.startswith("/fonts/") and url.path.endswith(".ttf"):
+            face = url.path[len("/fonts/"):-len(".ttf")]
+            path = screens.font_file(face) if face in screens.FONTS else None
+            if not path:
+                return self.send(404, "no such font")
+            with open(path, "rb") as f:
+                return self.send(200, f.read(), "font/ttf", cache="private, max-age=86400")
+        if url.path.startswith("/api/screens/"):
+            layout = load_screen(url.path[len("/api/screens/"):])
+            return self.send_json(layout) if layout else self.send(404, "no such screen")
+        if url.path.startswith("/screens/") and url.path.endswith(".png"):
+            sid = url.path[len("/screens/"):-len(".png")]
+            if not screens.ID_RE.match(sid):
+                return self.send(404, "no such screen")
+            try:
+                with open(screen_file(sid, ".png"), "rb") as f:
+                    png = f.read()
+            except OSError:
+                return self.send(404, "no preview")
             return self.send(200, png, "image/png", cache="private, max-age=86400")
         if url.path == "/screen.png":
             png = screen_png()
@@ -341,12 +474,28 @@ class Handler(BaseHTTPRequestHandler):
             with _sessions_lock:
                 _sessions.pop(c[COOKIE].value, None)
             return self.send_json({"ok": True}, 200)
+        if url.path == "/api/screens":
+            try:
+                sid = save_screen(json.loads(self.body(limit=2 * PNG_MAX)))
+            except ValueError as e:              # includes bad JSON and oversized bodies
+                return self.send_json({"ok": False, "error": str(e)}, 400)
+            except OSError as e:
+                return self.send_json({"ok": False, "error": str(e)}, 500)
+            return self.send_json({"ok": True, "id": sid, "name": "custom:" + sid})
+        if url.path == "/api/screens/delete":
+            try:
+                delete_screen(json.loads(self.body()).get("id"))
+            except (ValueError, AttributeError) as e:
+                return self.send_json({"ok": False, "error": str(e)}, 400)
+            except OSError as e:
+                return self.send_json({"ok": False, "error": str(e)}, 500)
+            return self.send_json({"ok": True})
         if url.path == "/api/apply":
             try:
                 name = json.loads(self.body()).get("name", "")
-            except ValueError:
+            except (ValueError, AttributeError):
                 name = ""
-            if not valid_name(name):
+            if not (valid_name(name) or valid_custom(name)):
                 return self.send_json({"ok": False, "error": "unknown dashboard"}, 400)
             try:
                 set_active(name)
@@ -438,6 +587,9 @@ h3{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)
 .card .thumb{aspect-ratio:3/2;background:#000;border-radius:5px;overflow:hidden}
 .card img{width:100%;height:100%;object-fit:contain;display:block}
 .card .name{font-size:13px;margin:8px 2px 2px;display:flex;justify-content:space-between;gap:6px;word-break:break-all}
+.card.new .thumb{border:2px dashed var(--line);background:transparent;font-size:15px;color:var(--fg)}
+.card.new:hover .thumb{border-color:var(--blue)}
+h3 .sub{text-transform:none;letter-spacing:0;font-weight:400;margin-left:8px}
 .badge{font-size:10px;font-weight:700;letter-spacing:.06em;background:var(--green);color:#08130a;border-radius:4px;padding:2px 6px;align-self:center;white-space:nowrap}
 </style></head><body>
 <header><h1>LCD Dashboards</h1><span class="host" id="host"></span>
@@ -452,6 +604,8 @@ h3{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)
   <p class="desc" id="pvdesc"></p>
   <div class="actions">
    <button class="primary" id="apply" disabled>Apply to screen</button>
+   <button id="edit" hidden>Edit</button>
+   <button id="del" hidden>Delete</button>
   </div>
   <div class="msg" id="msg"></div><div id="log"></div>
  </div>
@@ -462,13 +616,17 @@ h3{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)
   <p class="desc">Captured from the display every 5 seconds.</p>
  </div>
 </section>
+<h3>My screens <span class="sub">made in the editor</span></h3>
+<div class="grid" id="mine"></div>
 <h3>All dashboards</h3>
 <div class="grid" id="grid"></div>
 </main>
 <script>
 const CSRF = "__CSRF__";
 const $ = id => document.getElementById(id);
-let list = [], active = null, selected = null, status = {}, pending = null;
+let list = [], mine = [], active = null, selected = null, status = {}, pending = null;
+const find = name => mine.find(x => x.name === name) || list.find(x => x.name === name);
+const label = name => { const d = find(name || ""); return d && d.title ? d.title : (name || "").replace(/\\.py$/, ""); };
 
 function post(url, body) {
   return fetch(url, {method: "POST", headers: {"Content-Type": "application/json", "X-CSRF": CSRF},
@@ -485,13 +643,17 @@ function setMsg(text, cls, log) {
 }
 
 function previewUrl(d) {
+  if (d.custom) return "/screens/" + encodeURIComponent(d.id) + ".png?v=" + d.preview;
   return "/preview/" + encodeURIComponent(d.name) + ".png?v=" + d.preview;
 }
 
 function showPreview() {
   if (!selected) return;
-  const d = list.find(x => x.name === selected) || {};
-  $("pvname").textContent = selected;
+  const d = find(selected) || {};
+  $("pvname").textContent = label(selected);
+  $("edit").hidden = $("del").hidden = !d.custom;
+  $("del").disabled = selected === active;
+  $("del").title = selected === active ? "Apply another dashboard first" : "";
   $("pvtag").textContent = selected === active ? "on screen" : "";
   $("pvdesc").textContent = d.desc || "";
   $("pv").hidden = !d.preview; $("pvnote").hidden = !!d.preview;
@@ -511,8 +673,19 @@ function select(name) {
 }
 
 function renderGrid() {
-  const grid = $("grid"); grid.replaceChildren();
-  for (const d of list) {
+  fillGrid($("grid"), list);
+  const box = $("mine");
+  fillGrid(box, mine);
+  const add = document.createElement("a");
+  add.className = "card new"; add.href = "/editor"; add.style.textDecoration = "none";
+  const t = document.createElement("div"); t.className = "thumb"; t.textContent = "+ New screen";
+  const n = document.createElement("div"); n.className = "name"; n.textContent = "Design your own";
+  add.append(t, n); box.prepend(add);
+}
+
+function fillGrid(grid, items) {
+  grid.replaceChildren();
+  for (const d of items) {
     const card = document.createElement("button");
     card.className = "card" + (d.name === selected ? " sel" : ""); card.dataset.name = d.name;
     const thumb = document.createElement("div"); thumb.className = "thumb";
@@ -523,8 +696,8 @@ function renderGrid() {
       thumb.textContent = "no example image";
     }
     const name = document.createElement("div"); name.className = "name";
-    const label = document.createElement("span"); label.textContent = d.name.replace(/\\.py$/, "");
-    name.append(label);
+    const text = document.createElement("span"); text.textContent = label(d.name);
+    name.append(text);
     if (d.name === active) { const b = document.createElement("span"); b.className = "badge"; b.textContent = "ON SCREEN"; name.append(b); }
     card.append(thumb, name); card.title = d.desc || d.name;
     card.onclick = () => select(d.name);
@@ -539,8 +712,8 @@ function renderStatus() {
                reverted: ["bad", "Reverted"], stopped: ["bad", "Stopped"], unknown: ["", "Runner not reporting"]};
   const [cls, word] = map[st] || ["", st];
   dot.className = "dot " + cls;
-  pill.textContent = status.script ? `${word} · ${status.script.replace(/\\.py$/, "")} · ${ago(status.since)}` : word;
-  $("livename").textContent = status.script || "–";
+  pill.textContent = status.script ? `${word} · ${label(status.script)} · ${ago(status.since)}` : word;
+  $("livename").textContent = status.script ? label(status.script) : "–";
   $("livestate").textContent = st === "running" ? "running for " + ago(status.since) : st;
 }
 
@@ -550,7 +723,7 @@ async function refreshStatus() {
     const j = await r.json();
     const prevActive = active;
     active = j.active; status = j.status || {};
-    if (active !== prevActive) renderGrid();
+    if (active !== prevActive) { renderGrid(); showPreview(); }
     renderStatus(); updateApply();
     if (pending) checkPending();
   } catch (e) { $("pill").textContent = "Server not reachable"; $("dot").className = "dot bad"; }
@@ -559,12 +732,12 @@ async function refreshStatus() {
 function checkPending() {
   const err = status.last_error;
   if (err && err.script === pending.name && err.at >= pending.at) {
-    setMsg(`${pending.name} stopped after ${err.after}s (exit code ${err.code}). ` +
-           (status.good ? `The screen went back to ${status.good}.` : "It will be retried."), "bad", err.log);
+    setMsg(`${label(pending.name)} stopped after ${err.after}s (exit code ${err.code}). ` +
+           (status.good ? `The screen went back to ${label(status.good)}.` : "It will be retried."), "bad", err.log);
     pending = null; updateApply(); return;
   }
   if (status.script === pending.name && status.state === "running") {
-    setMsg(`${pending.name} is on the screen and running.`, "ok"); pending = null; updateApply(); return;
+    setMsg(`${label(pending.name)} is on the screen and running.`, "ok"); pending = null; updateApply(); return;
   }
   if (Date.now() / 1000 - pending.at > 60) {
     setMsg("No confirmation from the screen after a minute. Is the LCD service running?", "bad");
@@ -583,6 +756,16 @@ $("apply").onclick = async () => {
   active = selected; renderGrid(); checkPending(); updateApply();
 };
 $("logout").onclick = async () => { await post("/logout"); location.reload(); };
+$("edit").onclick = () => { const d = find(selected); if (d && d.custom) location.href = "/editor?id=" + encodeURIComponent(d.id); };
+$("del").onclick = async () => {
+  const d = find(selected);
+  if (!d || !d.custom || !confirm(`Delete "${d.title}"? This can't be undone.`)) return;
+  const r = await post("/api/screens/delete", {id: d.id});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) { setMsg("Could not delete: " + (j.error || r.status), "bad"); return; }
+  mine = mine.filter(x => x !== d); renderGrid();
+  select(active && find(active) ? active : (list[0] || {}).name);
+};
 
 let liveFailed = false;
 function refreshLive() {
@@ -600,10 +783,10 @@ function refreshLive() {
 (async () => {
   const r = await fetch("/api/dashboards"); if (r.status === 401) return location.reload();
   const j = await r.json();
-  list = j.dashboards; active = j.active; status = j.status || {};
+  list = j.dashboards; mine = j.screens || []; active = j.active; status = j.status || {};
   $("host").textContent = j.host;
   renderGrid(); renderStatus();
-  select(active && list.some(d => d.name === active) ? active : (list[0] || {}).name);
+  select(active && find(active) ? active : (list[0] || {}).name);
   refreshLive();
   setInterval(refreshStatus, 2000);
   setInterval(refreshLive, 5000);

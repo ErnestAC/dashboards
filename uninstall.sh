@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Undo install.sh.
 #
-#   sudo ./uninstall.sh            stop and remove the screen and web UI services
+#   sudo ./uninstall.sh            stop and remove the screen and web UI services; your
+#                                  settings and the screens you made are kept for a reinstall
 #   sudo ./uninstall.sh --purge    also delete /opt/lcd-dashboards, /var/lib/lcd-dashboard
-#                                  (chosen dashboard, password) and the lcd/lcdweb users
+#                                  (chosen dashboard, password, screens you made in the
+#                                  editor) and the lcd/lcdweb users
 #
 # Left alone: the apt packages (Pillow, psutil, fonts), which other things may use,
 # and the LCD driver in the boot config, so the screen keeps working for other uses.
@@ -54,9 +56,12 @@ ROBOTO=/usr/share/fonts/truetype/roboto/Roboto-Bold.ttf
 [[ -L "$ROBOTO" ]] && rm -f "$ROBOTO" && rmdir /usr/share/fonts/truetype/roboto 2>/dev/null || true
 
 if [[ $PURGE -eq 1 ]]; then
+  n=$(find /var/lib/lcd-dashboard/screens -name '*.json' 2>/dev/null | wc -l || true)
+  [[ $n -gt 0 ]] && say "Deleting $n screen(s) you made in the editor"
   say "Deleting /opt/lcd-dashboards, /var/lib/lcd-dashboard and the lcd/lcdweb users"
   [[ -f /opt/lcd-dashboards/webui/lcd_runner.py ]] && rm -rf /opt/lcd-dashboards
   rm -rf /var/lib/lcd-dashboard
   for u in lcdweb lcd; do id "$u" >/dev/null 2>&1 && userdel "$u"; done
 fi
-say "Removed."
+if [[ $PURGE -eq 1 ]]; then say "Removed."
+else say "Removed. Your settings and screens are kept in /var/lib/lcd-dashboard (--purge deletes them)."; fi
