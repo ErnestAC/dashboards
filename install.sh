@@ -206,8 +206,10 @@ if [[ -z "$UNIT" ]]; then
   GROUPS_LCD="${GROUPS_LCD# }"
   [[ -n "$GROUPS_LCD" ]] && usermod -a -G "${GROUPS_LCD// /,}" "$LCD_USER"
   RUN_AS="$LCD_USER"
-  if ! runuser -u "$LCD_USER" -- "$PY" -c "
-import sqlite3; c = sqlite3.connect('$PIHOLE_DB'); c.execute('SELECT COUNT(*) FROM queries LIMIT 1').fetchone()
+  # reading the schema proves access and is instant; counting queries can take
+  # minutes on a big database. The timeout guards against a long lock.
+  if ! timeout 20 runuser -u "$LCD_USER" -- "$PY" -c "
+import sqlite3; c = sqlite3.connect('$PIHOLE_DB', timeout=10); c.execute('SELECT COUNT(*) FROM sqlite_master').fetchone()
 " >/dev/null 2>&1; then
     warn "user $LCD_USER can't read Pi-hole's database; the screen will run as root instead"
     RUN_AS=root
